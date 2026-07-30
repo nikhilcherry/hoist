@@ -243,3 +243,24 @@ def test_passwordless_setup_scopes_sudo_to_one_command(tmp_path):
     assert "chmod 440" in joined
     # Never hand out blanket root.
     assert "NOPASSWD: ALL" not in joined
+
+
+def test_backup_goes_to_hoist_state_not_beside_the_config(tmp_path, monkeypatch):
+    """The config can be user-writable while its directory is still root-owned.
+
+    Writing the backup as a sibling then fails even though the edit succeeds.
+    """
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    config = etc / "config.yml"
+    config.write_text("ingress:\n  - service: http_status:404\n")
+    home = tmp_path / "hoisthome"
+    monkeypatch.setenv("HOIST_HOME", str(home))
+
+    backup = tunnel.write_config(config, "ingress:\n  - service: http_status:200\n")
+
+    assert backup.parent == home / "backups"
+    assert backup.parent.exists()
+    assert list(etc.iterdir()) == [config], "nothing may be written beside the config"
+    assert config.read_text().endswith("http_status:200\n")
+    assert backup.read_text().endswith("http_status:404\n")

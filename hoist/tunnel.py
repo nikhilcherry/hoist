@@ -274,7 +274,14 @@ def reaches_tunnel(url: str, expected: bytes, timeout: float = 12.0) -> tuple[bo
 
 def write_config(path: Path, text: str) -> Path:
     """Back up then write, escalating with sudo only when required."""
-    backup = path.with_name(path.name + f".hoist-bak.{int(time.time())}")
+    # Backups live in hoist's own state directory, not beside the config: the
+    # config may be user-writable while /etc/cloudflared is still root-owned,
+    # so writing a sibling file would fail even though the edit itself works.
+    backup_dir = Path(
+        os.environ.get("HOIST_HOME", Path.home() / ".config" / "hoist")
+    ) / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{path.name}.{int(time.time())}"
     if needs_sudo(path):
         copied = subprocess.run(
             ["sudo", "cp", str(path), str(backup)], capture_output=True, text=True
@@ -287,8 +294,11 @@ def write_config(path: Path, text: str) -> Path:
         if result.returncode != 0:
             raise TunnelError(sudo_hint(path, result.stderr))
     else:
-        shutil.copy2(path, backup)
-        path.write_text(text)
+        try:
+            shutil.copy2(path, backup)
+            path.write_text(text)
+        except OSError as exc:
+            raise TunnelError(f"could not write {path}: {exc}") from exc
     return backup
 
 
