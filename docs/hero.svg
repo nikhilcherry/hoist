@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="1" x2="0.4" y2="0">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#151d29"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#3fb950" stop-opacity="0"/>
+      <stop offset="1" stop-color="#3fb950" stop-opacity="0.30"/>
+    </linearGradient>
+    <linearGradient id="rail" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#3fb950" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#3fb950"/>
+    </linearGradient>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3fb950"/>
+      <stop offset="1" stop-color="#39c5cf"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="400" rx="18" fill="url(#sky)"/>
+  <rect x="0.5" y="0.5" width="1199" height="399" rx="18" fill="none" stroke="#30363d"/>
+
+  <!-- faint horizon rules -->
+  <g stroke="#ffffff" stroke-opacity="0.03">
+    <line x1="0" y1="118" x2="1200" y2="118"/>
+    <line x1="0" y1="200" x2="1200" y2="200"/>
+    <line x1="0" y1="282" x2="1200" y2="282"/>
+  </g>
+
+  <!-- ── the lift: a local port raised onto a public URL ───────────── -->
+
+  <!-- beam -->
+  <rect x="932" y="112" width="56" height="196" fill="url(#beam)"/>
+  <path d="M960 308V128" stroke="url(#rail)" stroke-width="2" stroke-dasharray="6 7"/>
+  <path d="M960 112l9 16h-18z" fill="#3fb950"/>
+
+  <!-- destination: the public URL -->
+  <rect x="830" y="58" width="260" height="46" rx="23" fill="#0d1117" stroke="#3fb950" stroke-opacity="0.65"/>
+  <circle cx="862" cy="81" r="5.5" fill="#3fb950"/>
+  <text x="880" y="87" fill="#7ee787" font-size="15" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">https://app.you.dev</text>
+
+  <!-- in flight: the app itself -->
+  <g transform="translate(924 170)">
+    <rect width="72" height="72" rx="15" fill="#3fb950"/>
+    <rect x="14" y="18" width="44" height="36" rx="5" fill="#0d1117"/>
+    <circle cx="21" cy="25" r="2.4" fill="#3fb950"/>
+    <circle cx="29" cy="25" r="2.4" fill="#3fb950"/>
+    <path d="M20 36h24M20 43h15" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round" opacity="0.75"/>
+  </g>
+
+  <!-- ground: where it was a moment ago -->
+  <rect x="888" y="308" width="144" height="42" rx="9" fill="#161b22" stroke="#30363d"/>
+  <text x="960" y="335" fill="#8b949e" font-size="16" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" text-anchor="middle">127.0.0.1</text>
+
+  <!-- ── wordmark ──────────────────────────────────────────────────── -->
+
+  <text x="88" y="176" fill="#f0f6fc" font-size="104" font-weight="700" letter-spacing="-3">hoist</text>
+  <rect x="90" y="196" width="118" height="5" rx="2.5" fill="url(#wire)"/>
+
+  <text x="88" y="250" fill="#c9d1d9" font-size="26">Put a local app on a public HTTPS URL, with one command.</text>
+
+  <!-- feature chips -->
+  <g font-size="16" fill="#8b949e">
+    <rect x="88" y="288" width="172" height="38" rx="19" fill="#161b22" stroke="#30363d"/>
+    <text x="174" y="313" text-anchor="middle">zero dependencies</text>
+
+    <rect x="272" y="288" width="164" height="38" rx="19" fill="#161b22" stroke="#30363d"/>
+    <text x="354" y="313" text-anchor="middle">survives reboots</text>
+
+    <rect x="448" y="288" width="186" height="38" rx="19" fill="#161b22" stroke="#30363d"/>
+    <text x="541" y="313" text-anchor="middle">QR code on screen</text>
+  </g>
+</svg>

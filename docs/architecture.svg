@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="470" viewBox="0 0 1200 470" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto">
+      <path d="M0 0l6 3-6 3z" fill="#484f58"/>
+    </marker>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1199" height="469" rx="14" fill="#0d1117" stroke="#30363d"/>
+
+  <!-- input -->
+  <rect x="60" y="34" width="240" height="46" rx="10" fill="#0d1117" stroke="#3fb950" stroke-opacity="0.6"/>
+  <text x="180" y="63" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="17" fill="#7ee787">hoist up ./app</text>
+  <path d="M180 80v58" stroke="#484f58" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <g fill="#161b22" stroke="#30363d">
+    <rect x="60" y="150" width="240" height="196" rx="12"/>
+    <rect x="340" y="150" width="240" height="196" rx="12"/>
+    <rect x="620" y="150" width="240" height="196" rx="12"/>
+    <rect x="900" y="150" width="240" height="196" rx="12"/>
+  </g>
+
+  <!-- sequential hand-offs -->
+  <g stroke="#484f58" stroke-width="1.5" marker-end="url(#arrow)">
+    <path d="M300 248h32"/>
+    <path d="M580 248h32"/>
+    <path d="M860 248h32"/>
+  </g>
+
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="16" fill="#39c5cf">
+    <text x="84" y="188">detect.py</text>
+    <text x="364" y="188">service.py</text>
+    <text x="644" y="188">tunnel.py</text>
+    <text x="924" y="188">qr.py</text>
+  </g>
+
+  <g font-size="14" fill="#8b949e">
+    <text x="84" y="222">Reads the directory,</text>
+    <text x="84" y="244">works out how to start</text>
+    <text x="84" y="266">it, and picks a free port.</text>
+
+    <text x="364" y="222">Writes a user systemd</text>
+    <text x="364" y="244">unit and starts it, so a</text>
+    <text x="364" y="266">crash or reboot is fine.</text>
+
+    <text x="644" y="222">Adds a marked ingress</text>
+    <text x="644" y="244">rule, validates it, routes</text>
+    <text x="644" y="266">DNS, reloads cloudflared.</text>
+
+    <text x="924" y="222">Renders the live URL as</text>
+    <text x="924" y="244">a scannable code, built</text>
+    <text x="924" y="266">from scratch in stdlib.</text>
+  </g>
+
+  <g stroke="#30363d">
+    <line x1="84" y1="290" x2="276" y2="290"/>
+    <line x1="364" y1="290" x2="556" y2="290"/>
+    <line x1="644" y1="290" x2="836" y2="290"/>
+    <line x1="924" y1="290" x2="1116" y2="290"/>
+  </g>
+
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" fill="#6e7681">
+    <text x="84" y="316">$PORT → 43581</text>
+    <text x="364" y="316">~/.config/systemd/user/</text>
+    <text x="644" y="316">/etc/cloudflared/config.yml</text>
+    <text x="924" y="316">your terminal</text>
+  </g>
+
+  <!-- out of the last stage, down to the thing you actually share -->
+  <path d="M1020 346v30h-160" stroke="#484f58" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="394" y="376" width="412" height="46" rx="23" fill="#0d1117" stroke="#3fb950" stroke-opacity="0.65"/>
+  <circle cx="426" cy="399" r="5.5" fill="#3fb950"/>
+  <text x="446" y="405" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="15" fill="#7ee787">https://app.example.com</text>
+  <text x="702" y="405" font-size="14" fill="#8b949e">+ a QR code</text>
+
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" fill="#6e7681">
+    <text x="60" y="443">state: ~/.config/hoist/apps.json</text>
+    <text x="1140" y="443" text-anchor="end">hoist down reverses all of it</text>
+  </g>
+</svg>

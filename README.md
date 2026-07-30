@@ -1,29 +1,23 @@
-# hoist
+<img src="docs/hero.svg" alt="hoist — put a local app on a public HTTPS URL, with one command" width="100%">
 
-**Put a local app on a public HTTPS URL, with one command.**
+<p align="center">
+  <img src="https://img.shields.io/github/actions/workflow/status/nikhilcherry/hoist/ci.yml?branch=main&amp;label=ci&amp;style=flat-square" alt="CI status">
+  <img src="https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/dependencies-none-3fb950?style=flat-square" alt="No dependencies">
+  <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT license">
+</p>
 
-```
-$ hoist up ./my-demo
-· my-demo · package.json (npm start) · port 43581
-  → $ npm start
-✓ listening on 127.0.0.1:43581
-✓ ingress rule added /etc/cloudflared/config.yml
-✓ DNS → my-demo.example.com
-✓ cloudflared reloaded
-
-  https://my-demo.example.com
-  hoist logs my-demo   ·   hoist down my-demo
-
-  ▄▄▄▄▄▄▄  ▄ ▄▄  ▄▄▄▄▄▄▄
-  █ ▄▄▄ █ ▀█▄▀▄█ █ ▄▄▄ █
-  █ ███ █ █▄ ▄▀█ █ ███ █
-  █▄▄▄▄▄█ █ ▀ ▀ █ █▄▄▄▄▄█
-   ... (scannable, in your terminal)
-```
+<p align="center">
+  <img src="docs/demo-up.svg" width="584" alt="hoist up publishing a directory: it picks a free port, writes a systemd unit, adds an ingress rule, routes DNS, reloads cloudflared, verifies the public URL, then prints it with a scannable QR code">
+</p>
 
 That's it. Your app is running as a managed service, it survives crashes and
 reboots, it has a real certificate, and the QR code on screen puts it on a
 judge's phone in about two seconds.
+
+> Every screenshot here is a real run, rendered from the terminal output by
+> [`scripts/make_docs_images.sh`](scripts/make_docs_images.sh). The QR codes in
+> them scan.
 
 ## Why
 
@@ -59,6 +53,11 @@ Check your setup any time:
 ```bash
 hoist doctor
 ```
+
+<img src="docs/demo-doctor.svg" width="100%" alt="hoist doctor checking systemd, lingering, cloudflared, the tunnel config and id, ingress hostnames, the default domain, and tracked apps">
+
+`doctor` never changes anything. When something is off it prints the exact
+command that fixes it.
 
 ## One-time setup: no password prompts
 
@@ -111,6 +110,8 @@ Only want a LAN URL? Skip cloudflared entirely and use `--local`.
 | `hoist adopt <name> --port N` | Publish something already running (Docker, `npm run dev`). |
 | `hoist doctor` | Check systemd, cloudflared, tunnel, domain, permissions. |
 
+<img src="docs/demo-ls.svg" width="557" alt="hoist ls listing two apps with their port, state and URL — one published through the tunnel, one on the LAN">
+
 ### Useful flags
 
 ```bash
@@ -158,6 +159,9 @@ slow to undo, and reusing the same name later just works.
 
 - **Offline?** `--local` gives you a LAN URL and a QR code with no internet
   and no cloudflared. Everyone on the venue wifi can reach your demo.
+
+  <img src="docs/demo-local.svg" width="566" alt="hoist up --local serving a directory on the LAN IP with a QR code, no tunnel and no internet involved">
+
 - **Demo day.** `hoist qr <name>` fills the terminal with a code judges can
   scan while you talk. No "let me just find the link".
 - **Webhooks.** Stripe, Twilio, GitHub and friends need a real HTTPS URL. A
@@ -168,14 +172,7 @@ slow to undo, and reusing the same name later just works.
 
 ## How it works
 
-```
-hoist up ./app
-   │
-   ├─ detect.py   pick a free port, work out the start command
-   ├─ service.py  write ~/.config/systemd/user/hoist-<name>.service, start it
-   ├─ tunnel.py   insert an ingress rule, validate, route DNS, reload
-   └─ qr.py       render the URL as a scannable code
-```
+<img src="docs/architecture.svg" width="100%" alt="Four stages: detect.py picks a free port and start command, service.py writes and starts a user systemd unit, tunnel.py adds an ingress rule and routes DNS, qr.py renders the URL as a scannable code">
 
 State lives in `~/.config/hoist/apps.json`. Nothing is hidden anywhere else:
 hoist only ever touches that file, its own systemd units, and the ingress
@@ -192,6 +189,19 @@ The QR encoder is written from scratch against the spec so the tool has no
 dependencies. It is tested two ways: a golden matrix in the unit tests, and
 `scripts/qr_conformance.py`, which renders codes to PNG and decodes them with
 `zbarimg` in CI.
+
+The screenshots in `docs/` are captured from real runs rather than drawn by
+hand, so they cannot drift from what the tool actually prints:
+
+```bash
+scripts/make_docs_images.sh                  # the --local screenshots
+scripts/make_docs_images.sh --public NAME    # also re-shoot the publish flow
+```
+
+`--public` performs a real publish, so pass a hostname you already use for
+testing — it rewrites your cloudflared config and restarts the tunnel. The
+script re-decodes every QR it renders with `zbarimg` at the end, and redacts
+the tunnel id out of the `doctor` shot.
 
 ## License
 
