@@ -173,3 +173,15 @@ def test_known_binary_is_resolved_to_an_absolute_path():
 def test_empty_command_is_rejected():
     with pytest.raises(service.ServiceError):
         service.build_exec_start("   ")
+
+
+def test_unit_disables_the_start_rate_limit():
+    """An app that crash-loops while being fixed must keep retrying.
+
+    With systemd's default StartLimitBurst it lands in `failed` and refuses to
+    start again even after the code is corrected.
+    """
+    unit = service.render_unit(sample_app())
+    assert "StartLimitIntervalSec=0" in unit
+    start_limit = unit.index("StartLimitIntervalSec=0")
+    assert start_limit < unit.index("[Service]"), "must be in the [Unit] section"

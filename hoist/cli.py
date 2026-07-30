@@ -13,6 +13,7 @@ from . import config, detect, qr, service, tunnel, ui
 __version__ = "0.1.0"
 
 HEALTH_TIMEOUT = 20.0
+CRASH_LOOP_RESTARTS = 2
 
 
 class UserError(Exception):
@@ -22,13 +23,40 @@ class UserError(Exception):
 # --- helpers ------------------------------------------------------------------
 
 
-def _wait_for_port(port: int, timeout: float = HEALTH_TIMEOUT) -> bool:
+def _wait_for_healthy(name: str, port: int, timeout: float = HEALTH_TIMEOUT) -> str:
+    """Wait for the port to open. Returns "up", "failed" or "timeout".
+
+    The unit state is watched alongside the port so a crashed app is reported
+    in a second or two instead of after the full timeout.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if detect.port_in_use(port):
-            return True
+            return "up"
+        if service.status(name) == "failed":
+            return "failed"
+        if service.n_restarts(name) >= CRASH_LOOP_RESTARTS:
+            return "crashing"
         time.sleep(0.25)
-    return False
+    return "timeout"
+
+
+def _report_health(name: str, port: int) -> str:
+    health = _wait_for_healthy(name, port)
+    if health == "up":
+        ui.ok(f"listening on 127.0.0.1:{port}")
+        return health
+    if health == "crashing":
+        ui.fail(f"{name} keeps crashing on startup")
+    elif health == "failed":
+        ui.fail(f"{name} failed to start")
+    else:
+        ui.warn(f"nothing listening on port {port} after {int(HEALTH_TIMEOUT)}s")
+    tail = service.recent_logs(name)
+    for line in tail.splitlines()[-8:]:
+        ui.step(line)
+    ui.step(f"full logs: hoist logs {name}")
+    return health
 
 
 def _parse_env(pairs: list[str] | None) -> dict[str, str]:
@@ -187,10 +215,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     except service.ServiceError as exc:
         raise UserError(f"failed to start service: {exc}") from exc
 
-    if _wait_for_port(port):
-        ui.ok(f"listening on 127.0.0.1:{port}")
-    else:
-        ui.warn(f"nothing listening on port {port} yet — check: hoist logs {name}")
+    health = _report_health(name, port)
 
     if use_tunnel:
         assert cf_path is not None and cf_text is not None and hostname is not None
@@ -205,9 +230,9 @@ def cmd_up(args: argparse.Namespace) -> int:
 
     url = _app_url(app)
     ui.banner(url, f"hoist logs {name}   ·   hoist down {name}")
-    if not args.no_qr:
+    if not args.no_qr and health == "up":
         _show_qr(url, args.ascii)
-    return 0
+    return 0 if health == "up" else 1
 
 
 def cmd_share(args: argparse.Namespace) -> int:

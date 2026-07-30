@@ -241,12 +241,18 @@ def restore(path: Path, backup: Path) -> None:
 def validate(path: Path) -> tuple[bool, str]:
     if not have_cloudflared():
         return True, "cloudflared not installed, skipped validation"
+    # `--config` is a flag on `tunnel`, not on `ingress validate`. Put it after
+    # the subcommand and cloudflared prints "Incorrect Usage" and still exits 0,
+    # which silently turns this safety check into a no-op.
     result = subprocess.run(
-        ["cloudflared", "tunnel", "ingress", "validate", "--config", str(path)],
+        ["cloudflared", "tunnel", "--config", str(path), "ingress", "validate"],
         capture_output=True,
         text=True,
     )
-    return result.returncode == 0, (result.stderr or result.stdout).strip()
+    output = (result.stderr or result.stdout).strip()
+    if "Incorrect Usage" in output or "flag provided but not defined" in output:
+        raise TunnelError(f"cannot validate ingress config: {output.splitlines()[0]}")
+    return result.returncode == 0, output
 
 
 def route_dns(tunnel: str, hostname: str) -> tuple[bool, str]:

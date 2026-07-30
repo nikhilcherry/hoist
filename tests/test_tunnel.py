@@ -131,3 +131,39 @@ def test_indentation_is_followed():
     out = tunnel.upsert(four_space, "demo", "demo.example.com", 8123)
     assert "    # hoist:demo" in out
     assert "    - hostname: demo.example.com" in out
+
+
+def test_validate_passes_config_before_the_subcommand(monkeypatch, tmp_path):
+    """`--config` is a flag on `tunnel`, not on `ingress validate`.
+
+    Put it after the subcommand and cloudflared prints "Incorrect Usage" and
+    exits 0, which silently turns validation into a no-op.
+    """
+    seen: dict[str, list[str]] = {}
+
+    class Result:
+        returncode = 0
+        stdout = "OK"
+        stderr = ""
+
+    monkeypatch.setattr(tunnel.shutil, "which", lambda _: "/usr/bin/cloudflared")
+    monkeypatch.setattr(
+        tunnel.subprocess, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and None or Result()
+    )
+    tunnel.validate(tmp_path / "config.yml")
+
+    cmd = seen["cmd"]
+    assert cmd.index("--config") < cmd.index("ingress"), cmd
+    assert cmd[:2] == ["cloudflared", "tunnel"]
+
+
+def test_validate_rejects_a_usage_error(monkeypatch, tmp_path):
+    class Result:
+        returncode = 0
+        stdout = "Incorrect Usage: flag provided but not defined: -config"
+        stderr = ""
+
+    monkeypatch.setattr(tunnel.shutil, "which", lambda _: "/usr/bin/cloudflared")
+    monkeypatch.setattr(tunnel.subprocess, "run", lambda cmd, **kw: Result())
+    with pytest.raises(tunnel.TunnelError, match="cannot validate"):
+        tunnel.validate(tmp_path / "config.yml")

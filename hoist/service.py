@@ -67,6 +67,9 @@ Description=hoist: {app['name']}
 Documentation=https://github.com/nikhilcherry/hoist
 After=network-online.target
 Wants=network-online.target
+# No start rate limit: an app that crash-loops while you are still fixing it
+# must keep retrying, not land in `failed` and stay there until reset-failed.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -93,15 +96,42 @@ def write_unit(app: dict) -> Path:
 
 
 def start(name: str) -> None:
+    # Clear any earlier failure so a fixed app starts instead of being refused.
+    _systemctl("reset-failed", unit_name(name))
     result = _systemctl("enable", "--now", unit_name(name))
     if result.returncode != 0:
         raise ServiceError(result.stderr.strip() or "systemctl enable --now failed")
 
 
 def restart(name: str) -> None:
+    _systemctl("reset-failed", unit_name(name))
     result = _systemctl("restart", unit_name(name))
     if result.returncode != 0:
         raise ServiceError(result.stderr.strip() or "systemctl restart failed")
+
+
+def n_restarts(name: str) -> int:
+    """How many times systemd has auto-restarted the unit since reset-failed.
+
+    With the start rate limit disabled a crash-looping unit never settles into
+    `failed`, so this is what tells us the app is not coming up.
+    """
+    result = _systemctl("show", "-p", "NRestarts", "--value", unit_name(name))
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return 0
+
+
+def recent_logs(name: str, lines: int = 12) -> str:
+    """Last few journal lines, for reporting a failed start inline."""
+    result = subprocess.run(
+        ["journalctl", "--user", "-u", unit_name(name), "-n", str(lines),
+         "--no-pager", "-o", "cat"],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 def stop_and_remove(name: str) -> None:
