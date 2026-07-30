@@ -134,8 +134,110 @@ hoist up ./site --domain example.com         # remembered for next time
 | `go.mod` | `go run .` |
 | `index.html` or any `*.html` | `python3 -m http.server $PORT` |
 
-Anything else: pass `--cmd`. Your app should bind the port in `$PORT`, which
-hoist sets in the environment and substitutes into the command.
+Anything else: tell hoist how to start it with `--cmd`.
+
+## Telling hoist how to start your app
+
+`--cmd` is for when the table above has no row for your project, or the guess
+it makes is wrong:
+
+```bash
+hoist up ./api --cmd 'uvicorn main:app --port $PORT'
+```
+
+### Rule 1: listen on the port hoist gives you
+
+hoist picks a free port, then publishes *that* port. If your app ignores it
+and listens on its own hardcoded port instead, hoist waits, then tells you
+`nothing listening on port 43581` — your app is running perfectly well, just
+somewhere nobody is looking. This is the one thing that has to be right.
+
+There are two ways to get the number, and they are equivalent — use whichever
+suits your app:
+
+- **Write `$PORT` in the command.** hoist substitutes the real number before
+  the app ever starts, so `--port $PORT` becomes `--port 43581`.
+- **Read `PORT` from the environment.** hoist always sets it, so
+  `process.env.PORT` in Node or `os.environ["PORT"]` in Python just works,
+  and you can leave `$PORT` out of the command entirely.
+
+### Rule 2: wrap it in single quotes
+
+```bash
+hoist up ./api --cmd 'uvicorn main:app --port $PORT'    # right
+hoist up ./api --cmd "uvicorn main:app --port $PORT"    # wrong
+```
+
+With double quotes **your shell** expands `$PORT` before hoist ever sees it.
+It is almost never set in your shell, so hoist receives `--port` followed by
+nothing and the app dies with a confusing error. Single quotes pass the text
+through untouched, which is what you want.
+
+### Rule 3: don't background it
+
+The command must run in the foreground and stay there — that is how systemd
+knows your app is alive. Anything that forks and returns immediately makes
+systemd think it exited:
+
+```bash
+--cmd 'npm start &'                  # no: the & backgrounds it
+--cmd 'gunicorn app:app --daemon'    # no: --daemon forks
+--cmd 'pm2 start server.js'          # no: pm2 is its own supervisor
+```
+
+Drop the `&`, the `--daemon`, the `pm2`. hoist is the supervisor.
+
+### Recipes
+
+| Stack | `--cmd` |
+| --- | --- |
+| Node / Express | `'node server.js'` — read `process.env.PORT` |
+| Next.js | `'npx next dev -p $PORT'` |
+| Vite | `'npm run dev -- --port $PORT'` |
+| FastAPI | `'uvicorn main:app --port $PORT'` |
+| Flask | `'flask run --port $PORT'` |
+| Django | `'python3 manage.py runserver 127.0.0.1:$PORT'` |
+| Gunicorn | `'gunicorn app:app --bind 127.0.0.1:$PORT'` |
+| Streamlit | `'streamlit run app.py --server.port $PORT'` |
+| Go | `'go run . --port $PORT'` |
+| Rust | `'cargo run --release -- --port $PORT'` |
+| A folder of files | `'python3 -m http.server $PORT'` |
+
+### What else you get
+
+- **It runs in the directory you hoisted**, so relative paths in the command
+  and in your code behave as they do when you run it by hand.
+- **Shell syntax works.** If the command contains `&&`, a pipe, a redirect or
+  a glob, hoist runs it through `sh -lc` instead of executing it directly, so
+  `--cmd 'npm run build && npm start'` is fine.
+- **Version managers work.** If the binary isn't on your `PATH` when you run
+  `hoist up`, the command is resolved by a login shell at start time instead,
+  so things installed through nvm, pyenv or rustup are still found.
+- **Extra environment variables** go in with `--env`, repeated as needed:
+  `--env DATABASE_URL=postgres://localhost/dev --env DEBUG=1`.
+
+### When it doesn't come up
+
+You don't have to go looking. `hoist up` waits for the port to open, and if it
+doesn't, it says which of the three ways it went wrong and prints the last few
+lines the app logged before dying:
+
+| What you see | What it usually means |
+| --- | --- |
+| `keeps crashing on startup` | the app exits as fast as it starts — a mistyped binary, a missing dependency, an import error. The tail says which. |
+| `failed to start` | systemd couldn't run the command at all |
+| `nothing listening on port N` | the app is running, on a *different* port. Rule 1. |
+
+For more than the tail, `hoist logs <name> -f` follows the app's journald
+output live. Nine times out of ten it is one of the three rules above: wrong
+port, double quotes, or a command that backgrounded itself.
+
+Already have the app running and only want it public? Skip `--cmd` entirely
+and adopt the port it is already on:
+
+```bash
+hoist adopt api --port 8000
+```
 
 ## Safety around your tunnel config
 
