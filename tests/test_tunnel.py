@@ -233,3 +233,13 @@ def test_reaches_tunnel_handles_unreachable_hosts(monkeypatch):
     good, detail = tunnel.reaches_tunnel("https://x.example.com", b"body")
     assert not good
     assert "not known" in detail
+
+
+def test_passwordless_setup_scopes_sudo_to_one_command(tmp_path):
+    cmds = tunnel.passwordless_setup(tmp_path / "config.yml", "alice")
+    joined = "\n".join(cmds)
+    assert "chown alice" in joined
+    assert "NOPASSWD: /usr/bin/systemctl restart cloudflared" in joined
+    assert "chmod 440" in joined
+    # Never hand out blanket root.
+    assert "NOPASSWD: ALL" not in joined

@@ -60,6 +60,33 @@ Check your setup any time:
 hoist doctor
 ```
 
+## One-time setup: no password prompts
+
+cloudflared does not watch its config file, so new ingress rules only take
+effect on restart -- which is the only reason root is involved. If your
+config is root-owned, sudo will prompt, and `hoist up` then has to run in a
+real terminal rather than any wrapper that lacks a TTY.
+
+To remove the prompt for good, run these once (`hoist doctor` prints them
+with your paths filled in):
+
+```bash
+sudo chown $USER /etc/cloudflared/config.yml
+echo "$USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart cloudflared" | sudo tee /etc/sudoers.d/hoist
+sudo chmod 440 /etc/sudoers.d/hoist
+```
+
+The sudoers rule is scoped to exactly one command -- restarting cloudflared --
+not blanket root.
+
+## A note on wildcard DNS
+
+If your zone has a wildcard record (`*.example.com`), every hostname resolves
+and returns *something*, so a half-finished publish looks like it worked --
+you get someone else's 404 instead of an error. After reloading the tunnel,
+hoist fetches the public URL and compares it against what your app serves
+locally, and tells you when a different server answered.
+
 ## Requirements
 
 - Linux with `systemd --user`

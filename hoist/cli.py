@@ -465,8 +465,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             ui.ok(f"default domain: {domain}")
         else:
             ui.warn("no domain inferred — pass --domain once")
-        if tunnel.needs_sudo(cf_path):
-            ui.warn(f"{cf_path} needs sudo to edit (you will be prompted)")
+        if tunnel.needs_sudo(cf_path) and not tunnel.sudo_is_passwordless():
+            ui.warn(f"{cf_path} needs root, and sudo will prompt for a password")
+            ui.step("`hoist up` must then run in a real terminal, not a wrapper")
+            ui.step("to remove the prompt for good, run these once:")
+            user = os.environ.get("USER") or Path.home().name
+            for line in tunnel.passwordless_setup(cf_path, user):
+                ui.step(f"    {line}")
+        elif tunnel.needs_sudo(cf_path):
+            ui.ok("sudo available without a password prompt")
     except tunnel.TunnelError as exc:
         ui.warn(str(exc))
 

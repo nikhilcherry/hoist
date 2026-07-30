@@ -217,6 +217,28 @@ def needs_sudo(path: Path) -> bool:
     return not os.access(path, os.W_OK)
 
 
+def sudo_is_passwordless() -> bool:
+    """Whether sudo will run without prompting (cached credentials or NOPASSWD)."""
+    result = subprocess.run(
+        ["sudo", "-n", "true"], capture_output=True, text=True
+    )
+    return result.returncode == 0
+
+
+def passwordless_setup(path: Path, user: str) -> list[str]:
+    """One-time commands that let hoist publish without a password prompt.
+
+    cloudflared does not watch its config file, so applying new ingress rules
+    means restarting it -- which is why root is involved at all.
+    """
+    return [
+        f"sudo chown {user} {path}",
+        f'echo "{user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart cloudflared"'
+        " | sudo tee /etc/sudoers.d/hoist",
+        "sudo chmod 440 /etc/sudoers.d/hoist",
+    ]
+
+
 def sudo_hint(path: Path, stderr: str) -> str:
     """Turn a sudo failure into something the user can act on."""
     detail = (stderr or "").strip().splitlines()
