@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from . import config, detect, qr, service, tunnel, ui
@@ -130,6 +131,35 @@ def _apply_ingress(
     return updated
 
 
+def _local_body(port: int, limit: int = 256) -> bytes:
+    """Grab a sample of what the app serves, to compare against the public URL."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as response:
+            return response.read(limit)
+    except Exception:
+        return b""
+
+
+def _verify_public(url: str, port: int, attempts: int = 5) -> None:
+    """Confirm the public URL really reaches this app, not something else.
+
+    On a zone with a wildcard DNS record any hostname resolves and returns a
+    page, so a half-finished publish looks like it worked. Comparing against
+    the local response is what actually catches that.
+    """
+    expected = _local_body(port)
+    for attempt in range(attempts):
+        good, detail = tunnel.reaches_tunnel(url, expected)
+        if good:
+            ui.ok(f"public URL verified ({detail})")
+            return
+        if attempt < attempts - 1:
+            time.sleep(2.0)
+    ui.warn(f"{url} did not serve this app: {detail}")
+    ui.step("DNS may still be propagating — re-check in a minute")
+    ui.step("if a wildcard record covers this zone, it can shadow the hostname")
+
+
 def _publish(text: str, hostname: str) -> None:
     tid = tunnel.tunnel_id(text)
     if tid:
@@ -217,16 +247,24 @@ def cmd_up(args: argparse.Namespace) -> int:
 
     health = _report_health(name, port)
 
+    # The app is running from here on, so record it before anything that can
+    # fail -- otherwise a failed tunnel step leaves a live service that
+    # `hoist ls` cannot see and `hoist down` cannot stop.
+    config.put_app(state, app)
+    config.save(state)
+
     if use_tunnel:
         assert cf_path is not None and cf_text is not None and hostname is not None
         updated = _apply_ingress(cf_path, cf_text, name, hostname, port)
         _publish(updated, hostname)
         state["domain"] = domain
+        config.save(state)
+        if health == "up":
+            _verify_public(f"https://{hostname}", port)
     else:
         app["lan_ip"] = detect.lan_ip()
-
-    config.put_app(state, app)
-    config.save(state)
+        config.put_app(state, app)
+        config.save(state)
 
     url = _app_url(app)
     ui.banner(url, f"hoist logs {name}   ·   hoist down {name}")

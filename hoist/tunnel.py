@@ -12,6 +12,8 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 MARKER = "# hoist:"
@@ -215,16 +217,53 @@ def needs_sudo(path: Path) -> bool:
     return not os.access(path, os.W_OK)
 
 
+def sudo_hint(path: Path, stderr: str) -> str:
+    """Turn a sudo failure into something the user can act on."""
+    detail = (stderr or "").strip().splitlines()
+    if any("terminal is required" in line or "password is required" in line
+           for line in detail):
+        return (
+            f"sudo could not prompt for a password, so {path} was not modified. "
+            "Run `sudo -v` first, then re-run this command."
+        )
+    return f"could not write {path}: {detail[-1] if detail else 'sudo failed'}"
+
+
+def reaches_tunnel(url: str, expected: bytes, timeout: float = 12.0) -> tuple[bool, str]:
+    """Check the public URL actually serves our app.
+
+    A wildcard DNS record on the zone will happily answer for a hostname the
+    tunnel was never told about, so "it returns a page" is not good enough --
+    the body has to match what the app serves locally.
+    """
+    request = urllib.request.Request(url, headers={"User-Agent": "hoist"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(len(expected) + 64)
+            server = response.headers.get("server", "?")
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code} from {exc.headers.get('server', '?')}"
+    except Exception as exc:  # DNS, TLS, timeout -- all just "not reachable yet"
+        return False, str(exc)
+    if expected and body[: len(expected)] != expected:
+        return False, f"a different server answered (server: {server})"
+    return True, server
+
+
 def write_config(path: Path, text: str) -> Path:
     """Back up then write, escalating with sudo only when required."""
     backup = path.with_name(path.name + f".hoist-bak.{int(time.time())}")
     if needs_sudo(path):
-        subprocess.run(["sudo", "cp", str(path), str(backup)], check=True)
+        copied = subprocess.run(
+            ["sudo", "cp", str(path), str(backup)], capture_output=True, text=True
+        )
+        if copied.returncode != 0:
+            raise TunnelError(sudo_hint(path, copied.stderr))
         result = subprocess.run(
             ["sudo", "tee", str(path)], input=text, capture_output=True, text=True
         )
         if result.returncode != 0:
-            raise TunnelError(result.stderr.strip() or "sudo tee failed")
+            raise TunnelError(sudo_hint(path, result.stderr))
     else:
         shutil.copy2(path, backup)
         path.write_text(text)

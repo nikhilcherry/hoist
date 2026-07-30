@@ -167,3 +167,69 @@ def test_validate_rejects_a_usage_error(monkeypatch, tmp_path):
     monkeypatch.setattr(tunnel.subprocess, "run", lambda cmd, **kw: Result())
     with pytest.raises(tunnel.TunnelError, match="cannot validate"):
         tunnel.validate(tmp_path / "config.yml")
+
+
+def test_sudo_hint_is_actionable_when_no_terminal(tmp_path):
+    msg = tunnel.sudo_hint(
+        tmp_path / "config.yml",
+        "sudo: a terminal is required to read the password\nsudo: a password is required",
+    )
+    assert "sudo -v" in msg
+    assert "was not modified" in msg
+
+
+def test_sudo_hint_falls_back_to_the_raw_error(tmp_path):
+    msg = tunnel.sudo_hint(tmp_path / "config.yml", "cp: disk on fire")
+    assert "disk on fire" in msg
+
+
+def test_reaches_tunnel_rejects_a_foreign_responder(monkeypatch):
+    """A wildcard DNS record answers for hostnames the tunnel never knew about."""
+
+    class Response:
+        headers = {"server": "Vercel"}
+
+        def read(self, _n):
+            return b"404: NOT_FOUND DEPLOYMENT_NOT_FOUND"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(tunnel.urllib.request, "urlopen", lambda *a, **k: Response())
+    good, detail = tunnel.reaches_tunnel("https://x.example.com", b"<h1>my app</h1>")
+    assert not good
+    assert "different server" in detail
+
+
+def test_reaches_tunnel_accepts_a_matching_body(monkeypatch):
+    body = b"<h1>my app</h1>"
+
+    class Response:
+        headers = {"server": "cloudflare"}
+
+        def read(self, _n):
+            return body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(tunnel.urllib.request, "urlopen", lambda *a, **k: Response())
+    good, detail = tunnel.reaches_tunnel("https://x.example.com", body)
+    assert good
+    assert detail == "cloudflare"
+
+
+def test_reaches_tunnel_handles_unreachable_hosts(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("name or service not known")
+
+    monkeypatch.setattr(tunnel.urllib.request, "urlopen", boom)
+    good, detail = tunnel.reaches_tunnel("https://x.example.com", b"body")
+    assert not good
+    assert "not known" in detail
