@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hoist-cli"
+version = "0.1.0"
+description = "Put a local app on a public HTTPS URL, with one command."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "nikhilcherry" }]
+keywords = ["cloudflare", "tunnel", "systemd", "hackathon", "deploy", "qr"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: System :: Systems Administration",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/nikhilcherry/hoist"
+Issues = "https://github.com/nikhilcherry/hoist/issues"
+
+[project.scripts]
+hoist = "hoist.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["hoist*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
