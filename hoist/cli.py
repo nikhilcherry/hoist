@@ -300,6 +300,13 @@ def cmd_ls(args: argparse.Namespace) -> int:
         listening = detect.port_in_use(app["port"])
         if listening and unit_state in ("active", "adopted"):
             health = ui.green("up")
+        elif unit_state == "adopted":
+            # There is no unit to ask about an adopted process, so the port is
+            # the only evidence there is -- and a dead one still has a DNS
+            # record and an ingress rule pointing at it, so the public URL
+            # answers 502. Printing "adopted" here read like an ordinary state
+            # and hid exactly that.
+            health = ui.red("down")
         elif unit_state == "active":
             health = ui.yellow("starting")
         elif unit_state == "failed":
