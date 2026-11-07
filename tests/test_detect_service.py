@@ -85,10 +85,11 @@ def test_detects_static_site(tmp_path):
     assert "static" in how
 
 
-def test_compose_gives_an_actionable_error(tmp_path):
+def test_compose_is_detected_as_a_stack(tmp_path):
     (tmp_path / "docker-compose.yml").write_text("services: {}")
-    with pytest.raises(detect.DetectionError, match="adopt"):
-        detect.detect_command(tmp_path)
+    (tmp_path / "package.json").write_text('{"scripts": {"start": "node ."}}')
+    command, how = detect.detect_command(tmp_path)
+    assert command == detect.COMPOSE and "docker-compose.yml" in how
 
 
 def test_empty_directory_is_an_error(tmp_path):

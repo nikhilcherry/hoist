@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · hoist</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<script>
+  try { const t = localStorage.getItem("hoist-theme"); const d = t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; document.documentElement.dataset.theme = d ? "dark" : "light"; } catch (e) {}
+</script>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="login">
+  <form id="login">
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M16 7.5v13M10.5 13 16 7.5 21.5 13" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 24.5h14" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/></svg>
+      <span class="brand-name" style="font-size:18px">hoist</span>
+    </div>
+    <div>
+      <h1>Sign in to this machine</h1>
+      <p class="muted" style="margin:6px 0 0">Run <code>hoist dash</code> in a terminal on it and open the link it prints, or paste the token from that link here.</p>
+    </div>
+    <div class="field">
+      <label for="token">Dashboard token</label>
+      <input class="input mono" id="token" name="token" autocomplete="current-password" type="password" required autofocus>
+      <span class="err" id="err" role="alert"></span>
+    </div>
+    <button class="btn primary" type="submit">Sign in</button>
+  </form>
+</main>
+<script>
+  document.getElementById("login").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = document.getElementById("err"); err.textContent = "";
+    const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: document.getElementById("token").value.trim() }) });
+    if (r.ok) location.replace("/"); else err.textContent = (await r.json().catch(() => ({}))).error || "Sign-in failed";
+  });
+</script>
+</body>
+</html>

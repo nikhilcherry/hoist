@@ -100,14 +100,31 @@ Only want a LAN URL? Skip cloudflared entirely and use `--local`.
 | Command | What it does |
 | --- | --- |
 | `hoist up [dir]` | Run a project and publish it. Detects the start command. |
+| `hoist up <git-url>` | Clone, build and publish a repo, then redeploy on every push. |
+| `hoist sync <name>` | Redeploy a repo app now if its branch moved (the timer runs this). |
 | `hoist share [dir]` | Serve a folder of files publicly. No project needed. |
 | `hoist ls` | Every hoisted app, its port, health and URL. |
 | `hoist down <name>` | Stop it and remove its ingress rule. |
-| `hoist logs <name> [-f]` | Tail the app's journald logs. |
+| `hoist logs <name> [-f]` | Tail the app's journald logs. `--deploys` shows the push-to-deploy log. |
 | `hoist restart <name>` | Restart the service. |
 | `hoist url <name>` | Print the URL (pipe it into `xdg-open`, Slack, etc). |
 | `hoist qr <name>` | Reprint the QR code. |
 | `hoist adopt <name> --port N` | Publish something already running (Docker, `npm run dev`). |
+| `hoist dash` | Open the web dashboard (below). `--service` keeps it running. |
+| `hoist pause / resume <name>` | Stop or restart redeploying a repo app on push. |
+| `hoist stop / start <name>` | Stop an app's process, keeping its URL and config. |
+| `hoist sync <name> --to <sha>` | Roll back to an earlier commit (pauses auto-deploy). |
+| `hoist limit <name> --memory 512M --cpu 50%` | Cap an app's resources. |
+| `hoist db postgres --name votes` | A database in Docker: PostgreSQL, MySQL, MariaDB, Redis or MongoDB. |
+| `hoist link <db> <app>` | Put the database's URL in the app's environment and restart it. |
+| `hoist backup <db> [--daily] [--restore F] [--offsite gdrive:hoist]` | Back up, schedule, restore, copy off-site. |
+| `hoist template <id>` | 46 one-click apps; `hoist template add <Compose file or URL> --name x` adds your own. |
+| `hoist stage <name> staging` | Label an app production, staging, development or preview; permissions can follow the label. |
+| `hoist previews <name> on` | Every branch gets its own preview app, removed when the branch is deleted. |
+| `hoist exec <name> -- <command>` | Run one command in the app's folder, container or stack. |
+| `hoist webhook <name>` | Deploy within a second of a push (GitHub or GitLab webhook). |
+| `hoist backup <stack>` | Back up a Docker stack's volumes too, not just databases. |
+| `hoist notify <webhook>` | Deploy, failed-build and downtime alerts to Discord, Slack, ntfy, Telegram or email (`smtps://…`). |
 | `hoist doctor` | Check systemd, cloudflared, tunnel, domain, permissions. |
 
 <img src="docs/demo-ls.svg" width="557" alt="hoist ls listing two apps with their port, state and URL — one published through the tunnel, one on the LAN">
@@ -121,6 +138,103 @@ hoist up ./api --env DATABASE_URL=postgres://localhost/dev
 hoist up ./site --local                      # LAN URL + QR, no tunnel, no internet
 hoist up ./site --domain example.com         # remembered for next time
 ```
+
+## Push to deploy
+
+Point `hoist up` at a repo instead of a folder and your teammates deploy by
+pushing. They need no access to your machine, no account and no CLI:
+
+```bash
+hoist up github.com/team/project --name team
+# ✓ cloned main @ a9f8649 mate: first page
+# ✓ built
+# ✓ watching main — every push redeploys (checks every 20s)
+#   https://team.example.com
+```
+
+hoist clones into its own checkout, runs the install/build the project needs
+(`npm ci` + `npm run build`, a `.venv` from `requirements.txt`, …), starts
+it, and installs a systemd timer that fetches the branch every 20 seconds.
+A new commit is checked out, built, and the service restarted.
+
+- **A broken push never takes the demo down.** If the build fails, the app
+  keeps serving the last good commit, `hoist ls` shows the failure, and that
+  commit is not retried until someone pushes again.
+- **Offline is fine.** A failed fetch is skipped; the next tick tries again.
+- **Polling, not webhooks**, so nothing has to accept inbound connections and
+  it works on venue Wi-Fi that blocks them.
+- Private repos use whatever git credentials this machine already has
+  (`gh auth login`, an SSH key).
+
+```bash
+hoist up git@github.com:team/api.git --branch demo   # track another branch
+hoist up github.com/team/web --build 'npm ci && npm run build:prod'
+hoist up github.com/team/web --no-sync               # deploy once, don't watch
+hoist logs team --deploys -f                         # watch deploys happen
+hoist sync team --force                              # rebuild right now
+```
+
+`hoist down team` stops the watcher and deletes the checkout as well.
+
+## The dashboard
+
+```bash
+hoist dash --service      # runs on 127.0.0.1:7457, survives reboots; prints a sign-in link once
+hoist dash --public dash  # optional: also at https://dash.<your-domain>, behind the same token
+```
+
+Everything the CLI does, in one place, for the whole team:
+
+- **Overview** that answers "can a judge open every app right now?" — each app's
+  public URL is checked every 30 s, and anything not answering says why
+  (*nothing is listening on port 8420*, *its public URL answers 502*).
+- **The route strip** on every app: source → build → process → port → public URL,
+  each hop live, so you see which one broke.
+- **Deployments** with the commit, author, trigger and build log of every push;
+  one-click **rollback** (instant when the release is still on disk) and redeploy;
+  with a webhook a push is live in about 0.3 s (`scripts/bench_deploy.sh`).
+- **Live logs** streamed from the journal, with search, follow and download —
+  the app's output or the deploy log.
+- **Environment variables** editor (paste a `.env`), **resource limits**, stop/start,
+  pause auto-deploy, take down.
+- **New app** from a git URL or a folder, with the build streaming as it runs.
+- **Routes** (every hostname on the tunnel, hand-written ones too, with a one-hour
+  uptime strip), **Machine** (CPU, memory, disk, the `hoist doctor` checks with
+  copyable fixes), **notifications** and a QR code for every app.
+- **Databases** with a connection card, one-click linking, daily backups,
+  restore and download; **ready-made apps** from the new-app drawer;
+  **branch previews**; a **console** that runs one command in the app.
+- **Team**: everyone gets their own sign-in link (`hoist dash --add-user shreyas`; `--role viewer` for read-only, or
+  `--role custom --can operate,backups --apps api --stages staging` to pick exactly what they can do and where), and an audit log records
+  who deployed, rolled back or changed what.
+- **Terminal**: an interactive shell in the app, its database or its stack.
+- **Machines**: link other machines running hoist and manage them all from one dashboard.
+- Command palette on <kbd>Ctrl</kbd> <kbd>K</kbd>, <kbd>N</kbd> for a new app, light and dark.
+
+How it stacks up against Dokploy, feature by feature and measured on the same
+laptop: [docs/vs-dokploy.md](docs/vs-dokploy.md).
+
+Zero dependencies like the rest of hoist: a standard-library server and one page
+of plain JavaScript, fonts bundled so it works with no internet. A token guards
+it (HttpOnly cookie plus a header every write must carry), because behind a
+tunnel every request arrives from 127.0.0.1.
+
+### How a deploy can never take the demo down
+
+Every deploy is exported from git into its own release directory, built there,
+and only then made live by swapping a `current` symlink and restarting. The
+running process keeps serving its own release the whole time, so a push that
+fails to build — or deletes files halfway — never touches it. The last four
+releases are kept, which is why rolling back to one of them needs no rebuild.
+
+### Docker apps
+
+A repo with a `compose.yml` runs as a Compose stack and one with only a
+`Dockerfile` is wrapped in one; both are built before they go live, like
+everything else. Their CPU and memory are read from the containers' own
+cgroups, and their limits go to Docker. Databases (`hoist db`) and templates
+(`hoist template`) are Docker apps too, so they get logs, restart, limits and
+the dashboard for free.
 
 ## What it detects
 

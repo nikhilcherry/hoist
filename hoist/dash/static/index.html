@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hoist</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/IBMPlexSans.woff2" as="font" type="font/woff2" crossorigin>
+<script>
+  try { const q = new URLSearchParams(location.search).get("theme"); if (q) localStorage.setItem("hoist-theme", q); const t = localStorage.getItem("hoist-theme"); const d = t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; document.documentElement.dataset.theme = d ? "dark" : "light"; } catch (e) {}
+</script>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="shell" id="shell">
+  <aside class="sidebar" id="sidebar" aria-label="Main">
+    <a class="brand" href="/" data-link>
+      <svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M16 7.5v13M10.5 13 16 7.5 21.5 13" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 24.5h14" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/></svg>
+      <span class="brand-name">hoist</span>
+      <span class="brand-host" id="brand-host" title="This machine"></span>
+    </a>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-foot" id="sidebar-foot"></div>
+  </aside>
+  <header class="topbar">
+    <button class="btn ghost icon menu-btn" id="menu-btn" aria-label="Open navigation"></button>
+    <div class="crumbs" id="crumbs"></div>
+    <button class="search-btn" id="search-btn" type="button" aria-label="Search apps and actions"></button>
+    <div class="live" id="live" title="Dashboard data refreshes every 3 seconds"><span class="beat"></span><span id="live-text">Connecting</span></div>
+  </header>
+  <main class="sheet" id="sheet">
+    <div class="page" id="page"></div>
+  </main>
+</div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<div id="layer"></div>
+<script src="/static/app.js"></script>
+<script src="/static/app.views.js"></script>
+<script src="/static/app.ui.js"></script>
+</body>
+</html>
