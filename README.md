@@ -192,7 +192,8 @@ Everything the CLI does, in one place, for the whole team:
   each hop live, so you see which one broke.
 - **Deployments** with the commit, author, trigger and build log of every push;
   one-click **rollback** (instant when the release is still on disk) and redeploy;
-  with a webhook a push is live in about 0.3 s (`scripts/bench_deploy.sh`).
+  with a webhook a push is live in about 0.3 s for a plain app and about 2 s for a
+  Dockerfile app (measured, with Dokploy on the same laptop, in [docs/benchmark.md](docs/benchmark.md)).
 - **Live logs** streamed from the journal, with search, follow and download —
   the app's output or the deploy log.
 - **Environment variables** editor (paste a `.env`), **resource limits**, stop/start,
@@ -212,7 +213,8 @@ Everything the CLI does, in one place, for the whole team:
 - Command palette on <kbd>Ctrl</kbd> <kbd>K</kbd>, <kbd>N</kbd> for a new app, light and dark.
 
 How it stacks up against Dokploy, feature by feature and measured on the same
-laptop: [docs/vs-dokploy.md](docs/vs-dokploy.md).
+laptop: [docs/vs-dokploy.md](docs/vs-dokploy.md); the measured side-by-side is
+[docs/benchmark.md](docs/benchmark.md).
 
 Zero dependencies like the rest of hoist: a standard-library server and one page
 of plain JavaScript, fonts bundled so it works with no internet. A token guards

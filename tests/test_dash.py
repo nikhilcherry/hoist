@@ -470,3 +470,22 @@ def test_someone_limited_to_an_environment_cannot_relabel_apps(two_apps):
     assert team.stage_of("api") == "staging"
     unscoped = team.add("lead", "custom", ["config"], [])
     assert call(port, "POST", "/api/apps/api/stage", {"stage": "staging"}, headers=_w(unscoped))[0] != 403
+
+
+def test_api_responses_are_not_delayed_by_nagle_and_delayed_ack(dash):
+    """The bug this pins: headers and body left as two small writes, so each API
+    call in a browser took ~45 ms (Nagle waiting for a delayed ACK). Thirty calls
+    on one keep-alive connection must come back in a few ms each."""
+    import time
+    port, token = dash
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    times = []
+    for _ in range(30):
+        started = time.perf_counter()
+        conn.request("GET", "/api/state", headers=auth(token))
+        conn.getresponse().read()
+        times.append(time.perf_counter() - started)
+    conn.close()
+    times.sort()
+    assert times[15] < 0.02, f"median {times[15] * 1000:.1f} ms"
+    assert server.make_handler(object()).disable_nagle_algorithm is True
