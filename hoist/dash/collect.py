@@ -463,6 +463,7 @@ def _repo_summary(repo: dict, timer: dict) -> dict:
         "failed_sha": repo.get("failed_sha"),
         "paused": bool(repo.get("paused")),
         "previews": bool(repo.get("previews")),
+        "webhook": bool(repo.get("webhook_secret")),
         "preview_failed": repo.get("preview_failed") or {},
         "build": repo.get("build", []),
         "watching": timer.get("ActiveState") == "active",

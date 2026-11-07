@@ -425,22 +425,80 @@ TEMPLATES: dict[str, dict] = {
     "metabase": {"label": "Metabase", "about": "Dashboards and charts from your databases",
                  "image": "metabase/metabase:latest", "port": 3000, "data": "/metabase-data",
                  "env": {"MB_DB_FILE": "/metabase-data/metabase.db"}},
+    "gitea": {"label": "Gitea", "about": "Your own GitHub: repos, issues, pull requests",
+              "image": "gitea/gitea:1.22", "port": 3000, "data": "/data",
+              "env": {"USER_UID": "1000", "USER_GID": "1000"}},
+    "code-server": {"label": "code-server", "about": "VS Code in the browser for pair programming",
+                    "image": "codercom/code-server:latest", "port": 8080, "data": "/home/coder",
+                    "env": {"PASSWORD": "{password}"}},
+    "minio": {"label": "MinIO", "about": "S3-compatible file storage with a web console",
+              "image": "minio/minio:latest", "port": 9001, "data": "/data",
+              "command": ["server", "/data", "--console-address", ":9001"],
+              "env": {"MINIO_ROOT_USER": "hoist", "MINIO_ROOT_PASSWORD": "{password}"}},
+    "mailpit": {"label": "Mailpit", "about": "Catch and read the emails your app sends while you build it",
+                "image": "axllent/mailpit:latest", "port": 8025},
+    "it-tools": {"label": "IT Tools", "about": "Converters, encoders and generators developers keep googling",
+                 "image": "corentinth/it-tools:latest", "port": 80},
+    "stirling-pdf": {"label": "Stirling PDF", "about": "Merge, split, OCR and convert PDFs",
+                     "image": "stirlingtools/stirling-pdf:latest", "port": 8080},
+    "node-red": {"label": "Node-RED", "about": "Wire IoT devices and APIs together visually",
+                 "image": "nodered/node-red:latest", "port": 1880, "data": "/data"},
+    "grafana": {"label": "Grafana", "about": "Dashboards for metrics and sensor data",
+                "image": "grafana/grafana:latest", "port": 3000, "data": "/var/lib/grafana",
+                "env": {"GF_SECURITY_ADMIN_PASSWORD": "{password}"}},
+    "filebrowser": {"label": "File Browser", "about": "Share and manage files from a web page",
+                    "image": "filebrowser/filebrowser:latest", "port": 80, "data": "/srv"},
+    "changedetection": {"label": "changedetection.io", "about": "Get told when a web page changes",
+                        "image": "ghcr.io/dgtlmoon/changedetection.io:latest", "port": 5000, "data": "/datastore"},
+    "jupyter": {"label": "Jupyter", "about": "Notebooks for the data and ML part of the project",
+                "image": "quay.io/jupyter/minimal-notebook:latest", "port": 8888, "data": "/home/jovyan/work",
+                "env": {"JUPYTER_TOKEN": "{password}"}},
+    "memos": {"label": "Memos", "about": "Team notes and a shared scratchpad",
+              "image": "neosmemo/memos:stable", "port": 5230, "data": "/var/opt/memos"},
+    "nocodb": {"label": "NocoDB", "about": "A spreadsheet-style database with a REST API",
+               "image": "nocodb/nocodb:latest", "port": 8080, "data": "/usr/app/data"},
+    "directus": {"label": "Directus", "about": "Headless CMS and admin panel with an API",
+                 "image": "directus/directus:11", "port": 8055, "data": "/directus/database",
+                 "env": {"KEY": "{random}", "SECRET": "{random}", "ADMIN_EMAIL": "admin@example.com",
+                         "ADMIN_PASSWORD": "{password}", "DB_CLIENT": "sqlite3",
+                         "DB_FILENAME": "/directus/database/data.db"}},
+    "linkding": {"label": "linkding", "about": "Shared bookmarks for the team's research",
+                 "image": "sissbruecker/linkding:latest", "port": 9090, "data": "/etc/linkding/data"},
+    "searxng": {"label": "SearXNG", "about": "Private metasearch your app can call",
+                "image": "searxng/searxng:latest", "port": 8080, "data": "/etc/searxng"},
+    "ghost": {"label": "Ghost", "about": "A blog or landing page with an editor",
+              "image": "ghost:5-alpine", "port": 2368, "data": "/var/lib/ghost/content",
+              "env": {"NODE_ENV": "development", "database__client": "sqlite3",
+                      "database__connection__filename": "/var/lib/ghost/content/data/ghost.db"}},
     "open-webui": {"label": "Open WebUI", "about": "ChatGPT-style chat for the Ollama models on this machine",
                    "image": "ghcr.io/open-webui/open-webui:main", "port": 8080, "data": "/app/backend/data",
                    "env": {"OLLAMA_BASE_URL": "http://host.docker.internal:11434"}, "host_gateway": True},
 }
 
 
-def template_compose(template_id: str) -> str:
+def template_secrets(template_id: str) -> dict[str, str]:
+    """Fresh values for a template's placeholders: {password} is shown to the
+    user once; each {random} is its own secret nobody needs to know."""
+    return {"password": secrets.token_urlsafe(12).replace("-", "x").replace("_", "y")}
+
+
+def template_compose(template_id: str, values: dict[str, str] | None = None) -> str:
     """A compose file for a template: one service, its port on ${PORT}, a named volume."""
     spec = TEMPLATES[template_id]
+    values = values or template_secrets(template_id)
+
+    def fill(value: str) -> str:
+        value = value.replace("{password}", values["password"])
+        while "{random}" in value:
+            value = value.replace("{random}", secrets.token_hex(24), 1)
+        return value
     lines = ["services:", "  app:", f"    image: {spec['image']}",
              f'    ports: ["127.0.0.1:${{PORT}}:{spec["port"]}"]']
     if spec.get("data"):
         lines.append(f'    volumes: ["data:{spec["data"]}"]')
     if spec.get("env"):
         lines.append("    environment:")
-        lines += [f'      {k}: "{v}"' for k, v in spec["env"].items()]
+        lines += [f'      {k}: "{fill(v)}"' for k, v in spec["env"].items()]
     if spec.get("command"):
         lines.append("    command: [" + ", ".join(f'"{c}"' for c in spec["command"]) + "]")
     if spec.get("host_gateway"):
@@ -453,3 +511,68 @@ def template_compose(template_id: str) -> str:
 def template_dir(app: str) -> Path:
     from . import config
     return config.STATE_DIR / "templates" / app
+
+
+# --- volume backups for stacks --------------------------------------------------
+
+TAR_IMAGE = "busybox:1.36"
+
+
+def stack_volumes(app: str) -> list[str]:
+    out = run("volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={compose_project(app)}",
+              timeout=30)
+    return sorted(out.stdout.split())
+
+
+def backup_volumes(app: str, log=print) -> Path:
+    """Pause the stack, tar every volume it owns into one archive, unpause."""
+    import os
+    import time as _time
+    volumes = stack_volumes(app)
+    if not volumes:
+        raise ContainerError(f"{app} has no Docker volumes, so there is nothing to back up")
+    pull(TAR_IMAGE, log=lambda _m: None)
+    root = backup_dir(app)
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    dest = root / f"{_time.strftime('%Y%m%d-%H%M%S')}.tar.gz"
+    partial = root / f".{dest.name}.partial"
+    mounts = [arg for v in volumes for arg in ("-v", f"{v}:/v/{v}:ro")]
+    base = [*shlex.split(docker()), "compose", "-p", compose_project(app)]
+    subprocess.run([*base, "pause"], capture_output=True, text=True, timeout=60)
+    try:
+        log(f"archiving {len(volumes)} volume(s): {', '.join(volumes)}")
+        # The archive streams out on stdout into a file this user creates, so it
+        # is never owned by the container's root.
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            out = subprocess.run([*shlex.split(docker()), "run", "--rm", *mounts, TAR_IMAGE,
+                                  "tar", "czf", "-", "-C", "/v", "."],
+                                 stdout=fh, stderr=subprocess.PIPE, timeout=3600)
+    finally:
+        subprocess.run([*base, "unpause"], capture_output=True, text=True, timeout=60)
+    if out.returncode != 0 or partial.stat().st_size == 0:
+        partial.unlink(missing_ok=True)
+        raise ContainerError(f"volume backup failed: {out.stderr.decode(errors='replace').strip()[:300]}")
+    os.replace(partial, dest)
+    for old in list_backups(app)[BACKUP_KEEP:]:
+        (root / old["file"]).unlink(missing_ok=True)
+    return dest
+
+
+def restore_volumes(app: str, file: Path, systemctl) -> None:
+    volumes = stack_volumes(app)
+    if not volumes:
+        raise ContainerError(f"{app} has no volumes to restore into")
+    systemctl("stop", f"hoist-{app}.service")
+    subprocess.run([*shlex.split(docker()), "compose", "-p", compose_project(app), "stop"],
+                   capture_output=True, text=True, timeout=120)
+    mounts = [arg for v in volumes for arg in ("-v", f"{v}:/v/{v}")]
+    clear = " && ".join(f"find /v/{shlex.quote(v)} -mindepth 1 -delete" for v in volumes)
+    with open(file, "rb") as fh:
+        out = subprocess.run([*shlex.split(docker()), "run", "--rm", "-i", *mounts, TAR_IMAGE,
+                              "sh", "-c", f"{clear} && tar xzf - -C /v"],
+                             stdin=fh, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600)
+    systemctl("start", f"hoist-{app}.service")
+    if out.returncode != 0:
+        raise ContainerError(f"volume restore failed: {out.stderr.decode(errors='replace').strip()[:300]}")

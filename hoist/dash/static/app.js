@@ -105,7 +105,26 @@ const statusPill = (s) => `<span class="pill ${esc(s)}"><span class="d"></span>$
 
 // ── api ─────────────────────────────────────────────────────────────────────
 
+// Which machine the dashboard is looking at: "local" or a linked machine's id.
+// Everything but sign-in and the machine list goes through /api/remote/<id>/.
+// Kept per tab (sessionStorage), never across visits: opening the dashboard
+// later must not silently land you on another machine.
+let currentServer = (() => { try { return sessionStorage.getItem("hoist-server") || "local"; } catch { return "local"; } })();
+const LOCAL_ONLY = /^\/api\/(servers|login|logout|qr\.svg)/;
+function apiPath(path) {
+  if (currentServer === "local" || !path.startsWith("/api/") || LOCAL_ONLY.test(path)) return path;
+  return `/api/remote/${currentServer}/${path.slice(5)}`;
+}
+function switchServer(id) {
+  currentServer = id || "local";
+  try { sessionStorage.setItem("hoist-server", currentServer); } catch {}
+  store.state = null; store.detail = {}; store.deployments = null; store.routes = null; store.team = null; store.metrics = null; store.doctor = null;
+  if (current().name === "app" || current().name === "notfound") history.replaceState({}, "", "/");
+  mount(); poll();
+}
+
 async function api(path, opts = {}) {
+  path = apiPath(path);
   const init = { headers: {}, ...opts };
   if (opts.body !== undefined) {
     init.method = opts.method || "POST";
@@ -129,19 +148,22 @@ const appByName = (n) => store.state?.apps.find((a) => a.name === n);
 async function poll() {
   try {
     store.state = await api("/api/state");
+    if (currentServer !== "local" && !store.fleet) store.fleet = await api("/api/servers").catch(() => null);
     store.lastOk = Date.now(); store.failing = false;
     const route = current();
     if (route.name === "app") {
       const detail = await api(`/api/apps/${route.params[0]}`).catch(() => null);
-      if (detail?.row?.kind === "db") detail.backups = await api(`/api/apps/${route.params[0]}/backups`).catch(() => null);
+      if (["db", "compose"].includes(detail?.row?.kind)) detail.backups = await api(`/api/apps/${route.params[0]}/backups`).catch(() => null);
       store.detail[route.params[0]] = detail;
     }
     if (route.name === "overview" || route.name === "machine") store.metrics = await api("/api/metrics");
     if (route.name === "deployments" || route.name === "overview") store.deployments = (await api("/api/deployments")).deployments;
     if (route.name === "routes") store.routes = (await api("/api/routes")).rules;
     if (route.name === "team") store.team = await api("/api/team");
+    if (route.name === "servers") { store.fleet = await api("/api/servers"); store.fleetBroken = store.fleet.servers.filter((x) => !x.ok || x.broken?.length).length; }
   } catch (e) {
     if (e.message !== "signed out") store.failing = true;
+    if (currentServer !== "local" && e.status === 404 && /no such machine/.test(e.message)) switchServer("local");
   }
   paintChrome();
   refresh();
@@ -172,6 +194,7 @@ const ROUTES = [
   ["machine", /^\/machine\/?$/],
   ["databases", /^\/databases\/?$/],
   ["team", /^\/team\/?$/],
+  ["servers", /^\/servers\/?$/],
 ];
 function current() {
   for (const [name, re] of ROUTES) { const m = location.pathname.match(re); if (m) return { name, params: m.slice(1) }; }
@@ -210,7 +233,7 @@ function mount() {
   $("#sheet").scrollTop = 0;
   paintChrome();
   if (view.mount) view.mount();
-  if (["app", "overview", "deployments", "routes", "machine", "databases", "team"].includes(route.name)) poll();
+  if (["app", "overview", "deployments", "routes", "machine", "databases", "team", "servers"].includes(route.name)) poll();
 }
 
 function renderPart(key, force = false) {
@@ -234,7 +257,11 @@ const part = (key, cls = "") => `<div data-part="${key}" class="${cls}"></div>`;
 
 function paintChrome() {
   const s = store.state; const route = current();
-  $("#brand-host").textContent = s?.host || "";
+  const linked = currentServer !== "local" ? (store.fleet?.servers || []).find((x) => x.id === currentServer) : null;
+  $("#brand-host").textContent = linked ? linked.name : (s?.host || "");
+  $("#brand-host").title = currentServer === "local" ? "This machine" : `Linked machine — managed through this dashboard`;
+  document.body.classList.toggle("remote", currentServer !== "local");
+  document.body.classList.toggle("viewer", s?.role === "viewer");
   const all = s?.apps || [];
   const apps = all.filter((a) => a.kind !== "db");
   const dbs = all.filter((a) => a.kind === "db");
@@ -252,6 +279,7 @@ function paintChrome() {
     navItem("/databases", "Databases", "db", route.name === "databases", dbs.length ? `<span class="count">${dbs.length}</span>` : "") +
     navItem("/machine", "Machine", "machine", route.name === "machine") +
     navItem("/team", "Team", "team", route.name === "team") +
+    (s?.role === "owner" || !s ? navItem("/servers", "Machines", "routes", route.name === "servers", store.fleetBroken ? `<span class="count bad">${store.fleetBroken}</span>` : "") : "") +
     (apps.length ? `<div class="nav-group">Apps</div>${appLinks}` : "");
   const dark = document.documentElement.dataset.theme === "dark";
   $("#sidebar-foot").innerHTML = `
@@ -261,7 +289,8 @@ function paintChrome() {
       <a href="#" data-action="logout">${ic("logout")}<span>Sign out</span></a>
     </div>
     <div class="meta">${s?.me ? `Signed in as ${esc(s.me)} · ` : ""}hoist ${esc(s?.version || "")}</div>`;
-  $("#crumbs").innerHTML = (view?.crumbs || []).map(([label, href], i, all) =>
+  $("#crumbs").innerHTML = (currentServer !== "local" ? `<button class="pill paused" data-action="switch-server" data-server="local" title="Back to this machine" style="border:0;cursor:pointer">on ${esc(linked?.name || currentServer)} ×</button>` : "") +
+    (view?.crumbs || []).map(([label, href], i, all) =>
     i === all.length - 1 ? `<span class="here">${esc(label)}</span>` : `<a href="${href}" data-link>${esc(label)}</a><span class="sep">/</span>`).join("");
   $("#search-btn").innerHTML = `${ic("search")}<span>Search apps and actions</span><kbd>Ctrl K</kbd>`;
   $("#menu-btn").innerHTML = ic("menu", 18);

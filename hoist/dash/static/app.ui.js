@@ -76,7 +76,7 @@ function termLine(line) {
 }
 function streamJob(job, term, onDone) {
   term.innerHTML = "";
-  const es = new EventSource(`/api/jobs/${job.id}/stream`);
+  const es = new EventSource(apiPath(`/api/jobs/${job.id}/stream`));
   es.addEventListener("line", (e) => { const atBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 30; term.insertAdjacentHTML("beforeend", termLine(JSON.parse(e.data))); if (atBottom) term.scrollTop = term.scrollHeight; });
   es.addEventListener("done", (e) => { es.close(); const j = JSON.parse(e.data); onDone?.(j); poll(); });
   es.onerror = () => { es.close(); api(`/api/jobs/${job.id}`).then((j) => { term.innerHTML = j.lines.map(termLine).join(""); if (j.status !== "running") onDone?.(j); }).catch(() => {}); };
@@ -322,6 +322,12 @@ async function doAction(action, name, el) {
   try {
     if (action === "new-app") return newAppDrawer();
     if (action === "new-db") return newDbDialog(el?.dataset.engine);
+    if (action === "switch-server") { switchServer(el.dataset.server); return toast(el.dataset.server === "local" ? "Back on this machine" : "Switched machine"); }
+    if (action === "remove-server") {
+      const ok = await confirmDialog({ title: "Unlink this machine?", body: "Its apps keep running; this dashboard just stops managing it. The stored token is deleted.", ok: "Unlink", danger: true });
+      if (!ok) return;
+      await post(`/api/servers/${el.dataset.server}/remove`); if (currentServer === el.dataset.server) switchServer("local"); return poll();
+    }
     if (action === "reveal-db") {
       const code = $("#db-url"); const show = code.dataset.masked === "1";
       code.textContent = show ? el.dataset.url : el.dataset.masked; code.dataset.masked = show ? "0" : "1";
@@ -340,6 +346,15 @@ async function doAction(action, name, el) {
       const on = el.dataset.on === "1";
       await post(`/api/apps/${name}/backup-schedule`, { on });
       toast(on ? `${name} is backed up every day` : `Daily backups of ${name} off`); return poll();
+    }
+    if (action === "webhook") {
+      const r = await post(`/api/apps/${name}/webhook`, { origin: location.origin });
+      $('[data-part="deploy"]').dataset.hold = "1";
+      $("#webhook-out").innerHTML = `<div class="notice info" style="flex-direction:column;gap:8px"><strong>Add this to the repo's webhooks (GitHub: Settings → Webhooks, content type application/json). The secret is shown once.</strong>
+        <div class="fix" style="width:100%"><code>${esc(r.url)}</code><button class="btn ghost icon sm" data-action="copy" data-text="${esc(r.url)}" aria-label="Copy URL">${ic("copy", 14)}</button></div>
+        <div class="fix" style="width:100%"><code>${esc(r.secret)}</code><button class="btn ghost icon sm" data-action="copy" data-text="${esc(r.secret)}" aria-label="Copy secret">${ic("copy", 14)}</button></div>
+        ${location.hostname === "127.0.0.1" || location.hostname === "localhost" ? '<span class="muted">GitHub cannot reach this address. Publish the dashboard first: <span class="mono">hoist dash --public dash</span>.</span>' : ""}</div>`;
+      return;
     }
     if (action === "previews") {
       const on = el.dataset.on === "1";
@@ -446,6 +461,15 @@ document.addEventListener("keydown", (e) => {
 });
 
 $("#search-btn").addEventListener("click", () => palette());
+$("#brand-host").addEventListener("click", async (e) => {
+  e.preventDefault(); e.stopPropagation();
+  let fleet = store.fleet;
+  try { fleet = await api("/api/servers"); store.fleet = fleet; } catch {}
+  const items = [{ label: `${fleet?.local?.host || "This machine"} (this one)`, icon: currentServer === "local" ? "check" : "dot", run: () => switchServer("local") }];
+  for (const srv of fleet?.servers || []) items.push({ label: `${srv.name}${srv.ok ? "" : " — not answering"}`, icon: currentServer === srv.id ? "check" : "dot", run: () => switchServer(srv.id) });
+  items.push("-", { label: "Manage machines…", icon: "routes", run: () => go("/servers") });
+  openMenu(e.currentTarget, items);
+});
 $("#menu-btn").addEventListener("click", () => $("#shell").classList.toggle("nav-open"));
 $("#sheet").addEventListener("click", () => $("#shell").classList.remove("nav-open"));
 

@@ -231,9 +231,10 @@ VIEWS.app = (name, tab = "overview") => {
 
 function appOverview(name, a, d) {
   return {
-    layout: () => `${part("route")}${part("live")}${part("previews")}${part("kpis")}<div class="grid-3-1">${part("charts", "card")}${part("qr", "card")}</div>${part("recent")}`,
+    layout: () => `${part("route")}${part("live")}${part("previews")}${part("kpis")}<div class="grid-3-1">${part("charts", "card")}${part("qr", "card")}</div>${part("stackbackups", "card")}${part("recent")}`,
     parts: {
       route() { const app = a(); return !app ? "" : app.kind === "db" ? dbConnectCard(app) : routeStrip(app); },
+      stackbackups() { const app = a(); return app?.kind === "compose" && d()?.backups ? backupsCard(name, app, d()) : ""; },
       previews() {
         const app = a(); if (!app?.repo || app.preview_of) return "";
         const kids = (store.state?.apps || []).filter((x) => x.preview_of === name);
@@ -288,14 +289,7 @@ function appOverview(name, a, d) {
       },
       qr() {
         const app = a(); if (!app) return "";
-        if (app.kind === "db") {
-          const b = d()?.backups; const list = b?.backups || [];
-          return `<div class="card-head"><h2>Backups</h2><div class="right"><button class="switch" role="switch" aria-checked="${!!b?.daily}" data-action="backup-schedule" data-on="${b?.daily ? "0" : "1"}" data-app="${name}" aria-label="Daily backups"></button>Daily</div></div>
-            <div class="card-body flush">${list.length ? `<div class="feed">${list.slice(0, 5).map((x) => `<div class="feed-item" style="grid-template-columns:minmax(0,1fr) auto"><div class="what"><div class="mono" style="font-size:12.5px">${esc(x.file)}</div><div class="muted" style="font-size:12px">${fmt.bytesText(x.size)} · ${fmt.ago(x.at)}</div></div>
-              <div class="actions" style="flex-wrap:nowrap"><a class="btn ghost icon sm" href="/api/apps/${name}/backups/${esc(x.file)}" download title="Download" aria-label="Download ${esc(x.file)}">${ic("download", 14)}</a><button class="btn ghost sm" data-action="restore" data-app="${name}" data-file="${esc(x.file)}">${ic("undo", 14)}Restore</button></div></div>`).join("")}</div>`
-              : `<div class="empty" style="padding:20px 16px">No backups yet. Data lives in the volume <span class="mono">${esc(app.db?.volume)}</span>.</div>`}
-              <div style="padding:12px 16px;border-top:1px solid var(--rule)"><button class="btn sm" data-action="backup" data-app="${name}">${ic("download", 14)}Back up now</button> <span class="muted" style="font-size:12px;margin-left:8px">The newest 10 are kept${app.db?.offsite ? ` · also copied to ${esc(app.db.offsite)}` : " · <span class=\"mono\">hoist backup " + esc(name) + " --offsite gdrive:hoist</span> copies them off this machine"}</span></div></div>`;
-        }
+        if (app.kind === "db") return backupsCard(name, app, d());
         return `<div class="card-head"><h2>Open on a phone</h2></div>
           <div class="qr-card"><img src="/api/qr.svg?text=${encodeURIComponent(app.url)}" alt="QR code for ${esc(app.url)}" width="132" height="132">
           <div><div class="url">${esc(app.public ? app.hostname : fmt.host(app.url))}</div><p class="muted" style="margin:6px 0 12px">Point a judge's camera at it.${app.public ? "" : " Works on the same Wi-Fi only."}</p>
@@ -309,6 +303,15 @@ function appOverview(name, a, d) {
       },
     },
   };
+}
+
+function backupsCard(name, app, detail) {
+  const b = detail?.backups; const list = b?.backups || [];
+  return `<div class="card-head"><h2>Backups</h2><div class="right"><button class="switch" role="switch" aria-checked="${!!b?.daily}" data-action="backup-schedule" data-on="${b?.daily ? "0" : "1"}" data-app="${name}" aria-label="Daily backups"></button>Daily</div></div>
+    <div class="card-body flush">${list.length ? `<div class="feed">${list.slice(0, 5).map((x) => `<div class="feed-item" style="grid-template-columns:minmax(0,1fr) auto"><div class="what"><div class="mono" style="font-size:12.5px">${esc(x.file)}</div><div class="muted" style="font-size:12px">${fmt.bytesText(x.size)} · ${fmt.ago(x.at)}</div></div>
+      <div class="actions" style="flex-wrap:nowrap"><a class="btn ghost icon sm" href="${apiPath(`/api/apps/${name}/backups/${x.file}`)}" download title="Download" aria-label="Download ${esc(x.file)}">${ic("download", 14)}</a><button class="btn ghost sm" data-action="restore" data-app="${name}" data-file="${esc(x.file)}">${ic("undo", 14)}Restore</button></div></div>`).join("")}</div>`
+      : `<div class="empty" style="padding:20px 16px">No backups yet. ${app.kind === "db" ? `Data lives in the volume <span class="mono">${esc(app.db?.volume)}</span>.` : "The stack's Docker volumes are archived together, with its containers paused for a moment."}</div>`}
+      <div style="padding:12px 16px;border-top:1px solid var(--rule)"><button class="btn sm" data-action="backup" data-app="${name}">${ic("download", 14)}Back up now</button> <span class="muted" style="font-size:12px;margin-left:8px">The newest 10 are kept${(detail?.backups?.offsite) ? ` · also copied to ${esc(detail.backups.offsite)}` : " · <span class=\"mono\">hoist backup " + esc(name) + " --offsite gdrive:hoist</span> copies them off this machine"}</span></div></div>`;
 }
 
 function routeStrip(app) {
@@ -417,7 +420,7 @@ function appLogs(name, a) {
       const r = await api(`/api/apps/${name}/logs?kind=${kind}&n=1000`);
       lines = r.lines; $("#log-unit").textContent = r.unit; paint();
     } catch (e) { $("#logview").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-    es = new EventSource(`/api/apps/${name}/logs/stream?kind=${kind}`);
+    es = new EventSource(apiPath(`/api/apps/${name}/logs/stream?kind=${kind}`));
     es.addEventListener("line", (e) => append(JSON.parse(e.data)));
     es.onerror = () => { $("#log-live").textContent = "Reconnecting…"; };
     es.onopen = () => { $("#log-live").textContent = "Streaming"; };
@@ -458,9 +461,44 @@ function appLogs(name, a) {
   };
 }
 
+let termSession = null;
+function loadOnce(src, css) {
+  if (css && !document.querySelector(`link[href="${css}"]`)) { const l = document.createElement("link"); l.rel = "stylesheet"; l.href = css; document.head.appendChild(l); }
+  if (document.querySelector(`script[src="${src}"]`)) return Promise.resolve();
+  return new Promise((ok, bad) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = bad; document.head.appendChild(s); });
+}
+async function openTerminal(name, a) {
+  termSession?.close();
+  const note = $("#term-note");
+  try {
+    await loadOnce("/static/vendor/xterm.js", "/static/vendor/xterm.css");
+    await loadOnce("/static/vendor/addon-fit.js");
+  } catch { note.textContent = "Could not load the terminal."; return; }
+  const host = $("#xterm"); if (!host) return;
+  if (currentServer !== "local") { note.textContent = "The interactive terminal opens on that machine's own dashboard. “Run one command” works from here."; return; }
+  const term = new window.Terminal({ cursorBlink: true, fontFamily: '"IBM Plex Mono", ui-monospace, monospace', fontSize: 13, theme: { background: "#0c0e0d", foreground: "#e6ebe8", cursor: "#4cc27f", selectionBackground: "#2a3a30" }, scrollback: 5000 });
+  const fit = new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open(host); fit.fit();
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/apps/${name}/terminal`);
+  ws.binaryType = "arraybuffer";
+  const sendSize = () => { if (ws.readyState === 1) ws.send(`r${term.cols},${term.rows}`); };
+  ws.onopen = () => { const app = a(); note.textContent = `Connected — ${app?.kind === "db" ? "a shell inside the database container" : app?.kind === "compose" ? "a shell inside the stack's web service" : `a login shell in ${app?.workdir || "the app folder"} with the app's environment`}. Closing the tab ends the session; it is written to the audit log.`; sendSize(); term.focus(); };
+  ws.onmessage = (e) => term.write(new Uint8Array(e.data));
+  ws.onclose = () => { note.textContent = "Session ended. Switch tabs and back to start a new one."; };
+  term.onData((d) => { if (ws.readyState === 1) ws.send("d" + d); });
+  const ro = new ResizeObserver(() => { try { fit.fit(); sendSize(); } catch {} }); ro.observe(host);
+  termSession = { close() { ro.disconnect(); try { ws.close(); } catch {} term.dispose(); termSession = null; }, focus() { term.focus(); }, send(text) { if (ws.readyState !== 1) return false; ws.send("d" + text); term.focus(); return true; } };
+}
+
 function appConsole(name, a) {
   const history = [];
   let hIdx = -1;
+  const chipsFor = () => {
+    const app = a();
+    if (app?.kind === "db") return { postgres: ["psql -U hoist -c '\\dt'", "psql -U hoist -c '\\l'", "env | sort", "df -h /var/lib/postgresql/data"], mysql: ["mysql -u hoist -p -e 'show databases'", "env | sort", "df -h /var/lib/mysql"], mariadb: ["mariadb -u hoist -p -e 'show databases'", "env | sort", "df -h /var/lib/mysql"], redis: ["redis-cli --no-auth-warning info memory | head -8", "df -h /data", "ls -la /data"], mongo: ["mongosh --quiet --eval 'db.stats()'", "env | sort", "df -h /data/db"] }[app.db?.engine] || ["ls", "env | sort"];
+    if (app?.kind === "compose") return ["ls -la", "env | sort | head -20", "ps aux | head", "df -h", "cat /etc/os-release | head -3"];
+    return ["ls -la", "env | sort", "git log --oneline -5", "ps aux --sort=-%mem | head -5", "df -h ."];
+  };
+  const chipsHtml = () => chipsFor().map((c) => `<button type="button" class="btn sm" data-chip="${esc(c)}"><span class="mono">${esc(c)}</span></button>`).join("");
   const examples = () => {
     const app = a();
     if (app?.kind === "db") return { postgres: "psql -U hoist -c '\\dt'", mysql: "mysql -u hoist -p$MYSQL_PASSWORD -e 'show tables'", mariadb: "mariadb -u hoist -p$MARIADB_PASSWORD -e 'show tables'", redis: "redis-cli --no-auth-warning -a $(cat /proc/1/cmdline | tr '\\0' ' ' | sed 's/.*requirepass //;s/ .*//') dbsize", mongo: "mongosh --quiet --eval 'db.stats()'" }[app.db?.engine] || "ls";
@@ -474,13 +512,28 @@ function appConsole(name, a) {
         return `<div class="notice info"><span>${ic("terminal")}</span><div class="grow">Runs one command ${app.kind === "db" ? "inside the database container" : app.kind === "compose" ? "inside the stack's web service" : "in the app's folder with its environment variables"} and streams the output. Good for migrations, seeding and quick checks. Each command is written to the audit log.</div></div>`;
       },
     },
-    layout: () => `${part("cnote")}
+    layout: () => `<div class="seg" role="group" aria-label="Console mode"><button type="button" data-cmode="term" aria-pressed="true">Terminal</button><button type="button" data-cmode="run" aria-pressed="false">Run one command</button></div>
+      <div id="term-wrap"><div id="xterm" style="height:300px;padding:8px;background:#0c0e0d;border-radius:var(--radius-card);overflow:hidden"></div>
+        <div class="muted" style="font-size:12px;margin-top:6px" id="term-note">Connecting…</div>
+        <div class="card" style="margin-top:var(--gap)"><div class="card-head"><h2>Quick commands</h2><div class="right">Click to type one into the terminal</div></div>
+          <div class="card-body" style="display:flex;flex-wrap:wrap;gap:8px" id="term-chips">${chipsHtml()}</div></div></div>
+      <div id="run-wrap" class="hidden" style="display:flex;flex-direction:column;gap:var(--gap)">${part("cnote")}
       <form class="card" id="console-form"><div class="card-body" style="display:flex;gap:8px;align-items:center">
         <span class="mono" style="color:var(--muted)">$</span>
         <input class="input mono" id="console-cmd" placeholder="${esc(examples())}" autocomplete="off" spellcheck="false" autofocus aria-label="Command">
         <button class="btn primary" type="submit">${ic("play", 14)}Run</button></div></form>
-      <div class="term" id="console-out" style="height:calc(100vh - 420px);min-height:280px"><div class="dim">Output appears here.</div></div>`,
+      <div class="term" id="console-out" style="height:calc(100vh - 460px);min-height:280px"><div class="dim">Output appears here.</div></div></div>`,
+    unmount() { termSession?.close(); },
+    refresh() { const el = $("#term-chips"); if (!el) return; const html = chipsHtml(); if (el.__html !== html) { el.__html = html; el.innerHTML = html; } },
     mount() {
+      $$("[data-cmode]").forEach((b) => b.addEventListener("click", () => {
+        $$("[data-cmode]").forEach((x) => x.setAttribute("aria-pressed", x === b));
+        const term = b.dataset.cmode === "term";
+        $("#term-wrap").classList.toggle("hidden", !term); $("#run-wrap").classList.toggle("hidden", term);
+        if (term) termSession?.focus(); else $("#console-cmd").focus();
+      }));
+      $("#term-chips").addEventListener("click", (e) => { const b = e.target.closest("[data-chip]"); if (!b) return; if (!termSession?.send(b.dataset.chip + "\r")) toast("The terminal is not connected", true); });
+      openTerminal(name, a);
       const input = $("#console-cmd"), out = $("#console-out");
       input.addEventListener("keydown", (e) => {
         if (e.key === "ArrowUp" && history.length) { hIdx = Math.min(hIdx + 1, history.length - 1); input.value = history[history.length - 1 - hIdx]; e.preventDefault(); }
@@ -624,6 +677,7 @@ function appSettings(name, a) {
           <div class="dt">Branch</div><div class="dd">${esc(r.branch)}</div>
           <div class="dt">Build steps</div><div class="dd">${r.build?.length ? r.build.map((s) => `<div><code>${esc(s)}</code></div>`).join("") : '<span class="muted">none</span>'}</div>
           <div class="dt">Auto-deploy</div><div class="dd" style="display:flex;align-items:center;gap:12px"><button class="switch" role="switch" aria-checked="${!r.paused}" data-action="${r.paused ? "resume" : "pause"}" data-app="${name}" aria-label="Auto-deploy"></button><span>${r.paused ? "Paused — pushes are ignored" : "On — checks every 20 seconds"}</span></div>
+          ${app.preview_of ? "" : `<div class="dt">Instant deploys</div><div class="dd" style="display:flex;flex-direction:column;gap:8px"><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span>${r.webhook ? "A webhook is set up — pushes deploy within seconds." : "Off — pushes are noticed by the 20-second check."}</span><button class="btn sm" data-action="webhook" data-app="${name}">${ic("link", 14)}${r.webhook ? "Issue a new secret" : "Set up a webhook"}</button></div><div id="webhook-out"></div></div>`}
           ${app.preview_of ? "" : `<div class="dt">Branch previews</div><div class="dd" style="display:flex;align-items:center;gap:12px"><button class="switch" role="switch" aria-checked="${!!r.previews}" data-action="previews" data-on="${r.previews ? "0" : "1"}" data-app="${name}" aria-label="Branch previews"></button><span>${r.previews ? "On — every branch gets its own app (up to 5)" : "Off"}</span></div>`}
         </div>`;
       },
@@ -785,12 +839,12 @@ function notifyCard() {
     <form class="card-body" id="notify-form" style="display:flex;flex-direction:column;gap:10px">
       <p class="muted" style="margin:0">A message when a deploy lands, a push fails to build, or a public URL stops answering for a minute.</p>
       <div class="field"><label for="notify-url">Webhook URL</label><input class="input mono" id="notify-url" placeholder="https://discord.com/api/webhooks/…" spellcheck="false" autocomplete="off">
-        <span class="hint">Discord, Slack, ntfy and Telegram links work as pasted; anything else gets JSON.</span></div>
+        <span class="hint">Discord, Slack, ntfy and Telegram links work as pasted; email is <span class="mono">smtps://user:app-password@smtp.gmail.com:465/?to=you@x.com</span>; anything else gets JSON.</span></div>
       <div class="actions"><button class="btn primary" type="submit">Save</button><button class="btn" type="button" id="notify-test">Send a test</button></div>
     </form></div>`;
 }
 function mountNotify() {
-  const kindNames = { discord: "Discord", slack: "Slack", ntfy: "ntfy", telegram: "Telegram", json: "JSON webhook" };
+  const kindNames = { discord: "Discord", slack: "Slack", ntfy: "ntfy", telegram: "Telegram", email: "email", json: "JSON webhook" };
   const show = (r) => { $("#notify-url").value = r.url || ""; $("#notify-kind").textContent = r.url ? `Sending to ${kindNames[r.kind] || r.kind}` : "Off"; };
   api("/api/notify").then(show).catch(() => {});
   $("#notify-form").addEventListener("submit", async (e) => {
@@ -860,7 +914,7 @@ VIEWS.team = () => ({
       const t = store.team; if (!t) return `<div class="card-body"><div class="skeleton" style="height:100px"></div></div>`;
       return `<div class="card-head"><h2>People</h2><div class="right">${fmt.plural(t.people.length, "person", "people")}</div></div>
         <div class="table-wrap"><table class="t stack"><thead><tr><th>Name</th><th>Role</th><th class="hide-sm">Added</th><th class="r">Last active</th><th></th></tr></thead><tbody>
-        ${t.people.map((p) => `<tr><td class="name">${esc(p.name)}${p.name === t.me ? ' <span class="pill">You</span>' : ""}</td><td>${p.role === "owner" ? "Owner" : "Member"}</td>
+        ${t.people.map((p) => `<tr><td class="name">${esc(p.name)}${p.name === t.me ? ' <span class="pill">You</span>' : ""}</td><td>${p.role === "owner" ? "Owner" : t.me === "owner" ? `<select class="select" style="width:auto;height:28px" data-role-of="${esc(p.name)}" aria-label="Role of ${esc(p.name)}"><option value="member" ${p.role === "member" ? "selected" : ""}>Member</option><option value="viewer" ${p.role === "viewer" ? "selected" : ""}>Viewer</option></select>` : p.role === "viewer" ? "Viewer" : "Member"}</td>
           <td class="hide-sm">${p.added ? esc(fmt.when(p.added)) : '<span class="dash">—</span>'}</td><td class="r">${p.seen ? fmt.ago(p.seen) : '<span class="dash">not since this dashboard started</span>'}</td>
           <td class="r">${t.me === "owner" && p.role !== "owner" ? `<button class="btn ghost sm danger" data-action="remove-user" data-user="${esc(p.name)}">Remove</button>` : ""}</td></tr>`).join("")}
         </tbody></table></div>`;
@@ -871,6 +925,7 @@ VIEWS.team = () => ({
       return `<div class="card-head"><h2>Add a teammate</h2></div>
         <form class="card-body" id="add-user" style="display:flex;flex-direction:column;gap:12px">
           <div class="field"><label for="new-user">Name</label><input class="input" id="new-user" placeholder="shreyas" pattern="[a-z][a-z0-9_\\-]{0,23}" required autocomplete="off" spellcheck="false"><span class="hint">Lowercase, used in the audit log.</span></div>
+          <div class="field"><label for="new-role">Role</label><select class="select" id="new-role"><option value="member">Member — deploy, restart, edit env and roll back</option><option value="viewer">Viewer — see everything, change nothing</option></select></div>
           <button class="btn primary" type="submit">${ic("plus")}Create sign-in link</button>
           <div id="new-link" class="hidden"></div>
         </form>`;
@@ -885,12 +940,17 @@ VIEWS.team = () => ({
     },
   },
   mount() {
+    $("#page").addEventListener("change", async (e) => {
+      const who = e.target.dataset?.roleOf; if (!who) return;
+      try { await post(`/api/team/${who}/role`, { role: e.target.value }); toast(`${who} is now a ${e.target.value}`); poll(); }
+      catch (err) { toast(err.message, true); }
+    });
     $("#page").addEventListener("submit", async (e) => {
       if (e.target.id !== "add-user") return;
       e.preventDefault();
       const name = $("#new-user").value.trim();
       try {
-        const r = await post("/api/team", { name, origin: location.origin });
+        const r = await post("/api/team", { name, role: $("#new-role").value, origin: location.origin });
         const box = $("#new-link"); box.classList.remove("hidden");
         box.innerHTML = `<div class="notice info" style="flex-direction:column;gap:8px"><strong>Send this to ${esc(r.name)}. It is shown once.</strong><div class="fix" style="width:100%"><code>${esc(r.link)}</code><button class="btn ghost icon sm" type="button" data-action="copy" data-text="${esc(r.link)}" aria-label="Copy link">${ic("copy", 14)}</button></div></div>`;
         $("#new-user").value = "";
@@ -900,6 +960,53 @@ VIEWS.team = () => ({
     });
   },
 });
+
+VIEWS.servers = () => ({
+  title: "Machines",
+  crumbs: [["Machines", "/servers"]],
+  layout: () => `<div class="title-row"><div class="titles"><h1>Machines</h1><div class="subline">Each machine runs its own hoist. Link them here to manage all of them from this dashboard; tokens stay on this machine.</div></div></div>
+    ${part("list", "card")}<div class="grid-3-1" style="align-items:start">${part("help", "card")}${linkCard()}</div>`,
+  parts: {
+    list() {
+      const f = store.fleet; if (!f) return `<div class="card-body"><div class="skeleton" style="height:100px"></div></div>`;
+      const rows = [{ id: "local", name: f.local.host, ok: true, host: f.local.host, apps: f.local.apps, broken: f.local.broken, system: f.local.system, local: true }, ...f.servers];
+      return `<div class="card-head"><h2>All machines</h2><div class="right">${fmt.plural(rows.length, "machine")}</div></div>
+        <div class="table-wrap"><table class="t stack"><thead><tr><th>Machine</th><th>Status</th><th class="r">Apps</th><th class="hide-sm">Not answering</th><th class="r hide-sm">CPU</th><th class="r hide-sm">Memory</th><th class="r hide-sm">Latency</th><th></th></tr></thead><tbody>
+        ${rows.map((r) => `<tr><td><div class="name">${esc(r.name)}${r.id === currentServer ? ' <span class="pill">Viewing</span>' : ""}</div><div class="sub">${r.local ? "this machine" : esc(r.url || "")}</div></td>
+          <td>${r.ok ? '<span class="pill up"><span class="d"></span>Reachable</span>' : `<span class="pill down"><span class="d"></span>Not answering</span><div class="sub" style="color:var(--negative)">${esc(r.error || "")}</div>`}</td>
+          <td class="r">${r.apps ?? "—"}</td><td class="hide-sm">${r.broken?.length ? `<span style="color:var(--negative)">${r.broken.map(esc).join(", ")}</span>` : r.ok ? '<span class="muted">none</span>' : '<span class="dash">—</span>'}</td>
+          <td class="r hide-sm">${r.system?.cpu != null ? fmt.pct(r.system.cpu, 0) : '<span class="dash">—</span>'}</td>
+          <td class="r hide-sm">${r.system?.mem_total ? fmt.pct(100 * r.system.mem_used / r.system.mem_total, 0) : '<span class="dash">—</span>'}</td>
+          <td class="r hide-sm">${r.latency_ms != null ? fmt.ms(r.latency_ms) : '<span class="dash">—</span>'}</td>
+          <td class="r nowrap">${r.id === currentServer ? "" : `<button class="btn sm" data-action="switch-server" data-server="${esc(r.id)}">Open</button>`}${r.local ? "" : ` <button class="btn ghost sm danger" data-action="remove-server" data-server="${esc(r.id)}">Unlink</button>`}</td></tr>`).join("")}
+        </tbody></table></div>`;
+    },
+    help() {
+      return `<div class="card-head"><h2>How it works</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:10px">
+        <p style="margin:0">On the other machine, install hoist and run <span class="mono">hoist dash --service</span> (and <span class="mono">hoist dash --public dash</span> if it is not on your network). Paste its address and the owner link it prints.</p>
+        <p class="muted" style="margin:0">Opening a machine switches this whole dashboard to it: apps, deploys, logs, databases, backups and rollbacks all act there. Only the owner of this dashboard can do this; the other machine's link never reaches the browser.</p></div>`;
+    },
+  },
+  mount() {
+    $("#page").addEventListener("submit", async (e) => {
+      if (e.target.id !== "link-machine") return;
+      e.preventDefault();
+      const b = $("button[type=submit]", e.target); b.disabled = true;
+      try {
+        const r = await post("/api/servers", { name: $("#m-name").value, url: $("#m-url").value, token: $("#m-token").value });
+        toast(`${r.name} linked`); e.target.reset(); poll();
+      } catch (err) { toast(err.message, true); } finally { b.disabled = false; }
+    });
+  },
+});
+
+function linkCard() {
+  return `<form class="card" id="link-machine"><div class="card-head"><h2>Link a machine</h2></div><div class="card-body" style="display:flex;flex-direction:column;gap:12px">
+    <div class="field"><label for="m-name">Name</label><input class="input" id="m-name" placeholder="koustav-laptop" required autocomplete="off"></div>
+    <div class="field"><label for="m-url">Dashboard address</label><input class="input mono" id="m-url" placeholder="https://dash.example.com" required autocomplete="off" spellcheck="false"></div>
+    <div class="field"><label for="m-token">Owner link or token</label><input class="input mono" id="m-token" type="password" placeholder="https://…/?token=…" required autocomplete="off"><span class="hint">Checked before it is saved; stored only on this machine, readable by you alone.</span></div>
+    <button class="btn primary" type="submit">${ic("link")}Link</button></div></form>`;
+}
 
 VIEWS.notfound = () => ({
   title: "Not found", crumbs: [["Not found", "/"]],

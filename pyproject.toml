@@ -37,7 +37,7 @@ dev = ["pytest>=7"]
 include = ["hoist*"]
 
 [tool.setuptools.package-data]
-"hoist.dash" = ["static/*", "static/fonts/*"]
+"hoist.dash" = ["static/*", "static/fonts/*", "static/vendor/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

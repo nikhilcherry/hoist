@@ -121,7 +121,9 @@ Only want a LAN URL? Skip cloudflared entirely and use `--local`.
 | `hoist template <id>` | One-click apps: Uptime Kuma, n8n, ntfy, Excalidraw, PocketBase, Metabase, Open WebUI. |
 | `hoist previews <name> on` | Every branch gets its own preview app, removed when the branch is deleted. |
 | `hoist exec <name> -- <command>` | Run one command in the app's folder, container or stack. |
-| `hoist notify <webhook>` | Deploy, failed-build and downtime alerts to Discord, Slack, ntfy or Telegram. |
+| `hoist webhook <name>` | Deploy within a second of a push (GitHub or GitLab webhook). |
+| `hoist backup <stack>` | Back up a Docker stack's volumes too, not just databases. |
+| `hoist notify <webhook>` | Deploy, failed-build and downtime alerts to Discord, Slack, ntfy, Telegram or email (`smtps://…`). |
 | `hoist doctor` | Check systemd, cloudflared, tunnel, domain, permissions. |
 
 <img src="docs/demo-ls.svg" width="557" alt="hoist ls listing two apps with their port, state and URL — one published through the tunnel, one on the LAN">
@@ -188,7 +190,8 @@ Everything the CLI does, in one place, for the whole team:
 - **The route strip** on every app: source → build → process → port → public URL,
   each hop live, so you see which one broke.
 - **Deployments** with the commit, author, trigger and build log of every push;
-  one-click **rollback** (instant when the release is still on disk) and redeploy.
+  one-click **rollback** (instant when the release is still on disk) and redeploy;
+  with a webhook a push is live in about 0.3 s (`scripts/bench_deploy.sh`).
 - **Live logs** streamed from the journal, with search, follow and download —
   the app's output or the deploy log.
 - **Environment variables** editor (paste a `.env`), **resource limits**, stop/start,
@@ -200,8 +203,11 @@ Everything the CLI does, in one place, for the whole team:
 - **Databases** with a connection card, one-click linking, daily backups,
   restore and download; **ready-made apps** from the new-app drawer;
   **branch previews**; a **console** that runs one command in the app.
-- **Team**: everyone gets their own sign-in link (`hoist dash --add-user shreyas`),
-  and an audit log records who deployed, rolled back or changed what.
+- **Team**: everyone gets their own sign-in link (`hoist dash --add-user shreyas`,
+  `--role viewer` for read-only with secrets hidden), and an audit log records
+  who deployed, rolled back or changed what.
+- **Terminal**: an interactive shell in the app, its database or its stack.
+- **Machines**: link other machines running hoist and manage them all from one dashboard.
 - Command palette on <kbd>Ctrl</kbd> <kbd>K</kbd>, <kbd>N</kbd> for a new app, light and dark.
 
 How it stacks up against Dokploy, feature by feature and measured on the same

@@ -14,6 +14,7 @@ Security model:
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import mimetypes
@@ -30,7 +31,7 @@ from pathlib import Path
 
 from .. import __version__ as VERSION
 from .. import config, containers, detect, notify, qr, service, source
-from . import collect, jobs, team
+from . import collect, fleet, jobs, team, terminal
 
 STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "hoist_dash"
@@ -222,6 +223,17 @@ def make_handler(dash: Dashboard):
             if not self._authed():
                 return self._error(401, "sign in first")
 
+            remote = re.fullmatch(r"/api/remote/([a-z0-9-]+)/(.+)", path)
+            if remote:
+                return self._proxy("GET", remote.group(1), remote.group(2), url.query)
+            if path == "/api/servers":
+                local = dash.monitor.get()
+                apps = [a for a in local.get("apps", []) if a.get("kind") != "db"]
+                broken = [a["name"] for a in apps if a.get("status") in ("down", "failed")
+                          or (a.get("public") and a.get("probe") and not a["probe"].get("up"))]
+                return self._json({"local": {"host": local.get("host"), "apps": len(apps), "broken": broken,
+                                             "system": local.get("system")},
+                                   "servers": fleet.summary() if self.user == team.OWNER else []})
             try:
                 return self._api_get(path, query)
             except (BrokenPipeError, ConnectionResetError):
@@ -230,6 +242,9 @@ def make_handler(dash: Dashboard):
         def do_POST(self):  # noqa: N802
             url = urllib.parse.urlsplit(self.path)
             path = url.path
+            match = re.fullmatch(r"/hooks/([a-z0-9-]+)", path)
+            if match:
+                return self._webhook(match.group(1))
             if path == "/api/login":
                 try:
                     given = str(self._body().get("token", ""))
@@ -247,6 +262,11 @@ def make_handler(dash: Dashboard):
                 return self._error(401, "sign in first")
             if self.headers.get("X-Hoist") != "1":
                 return self._error(403, "missing X-Hoist header")
+            remote = re.fullmatch(r"/api/remote/([a-z0-9-]+)/(.+)", path)
+            if remote:
+                return self._proxy("POST", remote.group(1), remote.group(2), url.query)
+            if team.role_of(self.user) == "viewer":
+                return self._error(403, "viewers can look but not change anything")
             try:
                 body = self._body()
             except (ValueError, json.JSONDecodeError) as exc:
@@ -261,9 +281,12 @@ def make_handler(dash: Dashboard):
         def _api_get(self, path: str, query: dict) -> None:
             if path == "/api/state":
                 snap = dash.monitor.get()
+                if team.role_of(self.user) == "viewer":
+                    snap = redact_state(snap)
                 snap["jobs"] = dash.jobs.recent()[:12]
                 snap["version"] = VERSION
                 snap["me"] = self.user
+                snap["role"] = team.role_of(self.user)
                 return self._json(snap)
 
             if path == "/api/deployments":
@@ -280,6 +303,8 @@ def make_handler(dash: Dashboard):
 
             if path == "/api/notify":
                 url = (config.load().get("notify") or {}).get("url")
+                if url and team.role_of(self.user) == "viewer":
+                    url = _URL_SECRET.sub(r"\1••••••@", url)
                 return self._json({"url": url, "kind": notify.kind(url) if url else None})
 
             if path == "/api/templates":
@@ -291,7 +316,7 @@ def make_handler(dash: Dashboard):
                 people = [{"name": team.OWNER, "role": "owner", "added": None,
                            "seen": dash.seen.get(team.OWNER)}]
                 for name, info in sorted(team.users().items()):
-                    people.append({"name": name, "role": "member", "added": info.get("added"),
+                    people.append({"name": name, "role": info.get("role", "member"), "added": info.get("added"),
                                    "seen": dash.seen.get(name)})
                 return self._json({"me": self.user, "people": people,
                                    "audit": team.audit_tail(int((query.get("n") or ["200"])[0]))})
@@ -323,6 +348,11 @@ def make_handler(dash: Dashboard):
                 job = dash.jobs.get(match.group(1))
                 if job is None:
                     return self._error(404, "no such job")
+                if team.role_of(self.user) == "viewer":
+                    data = job.as_dict(with_lines=True)
+                    data["lines"] = [re.sub(r"(password[^:]*:\s*)\S+", r"\1••••••", ln, flags=re.I)
+                                     for ln in data["lines"]]
+                    return self._json(data)
                 if not match.group(2):
                     return self._json(job.as_dict(with_lines=True))
                 return self._stream_job(job)
@@ -332,17 +362,25 @@ def make_handler(dash: Dashboard):
                 name, rest = match.group(1), match.group(2) or ""
                 if rest == "":
                     detail = dash.app_detail(name)
+                    if detail and team.role_of(self.user) == "viewer":
+                        detail = redact(detail)
                     return self._json(detail) if detail else self._error(404, "no such app")
                 app = dash.app(name)
                 if app is None:
                     return self._error(404, "no such app")
+                if rest == "/terminal":
+                    return self._terminal(name, app)
                 if rest == "/backups":
-                    if app.get("kind") != "db":
-                        return self._error(400, "only databases have backups")
+                    if app.get("kind") not in ("db", "compose"):
+                        return self._error(400, "only databases and Docker stacks have backups")
+                    holder = app.get("db") or app.get("backup") or {}
                     return self._json({"backups": containers.list_backups(name),
-                                       "daily": bool(app["db"].get("daily_backup"))})
+                                       "daily": bool(holder.get("daily_backup")),
+                                       "offsite": holder.get("offsite")})
                 match_dl = re.fullmatch(r"/backups/([0-9]{8}-[0-9]{6}\.[a-z.]+)", rest)
-                if match_dl and app.get("kind") == "db":
+                if match_dl and team.role_of(self.user) == "viewer":
+                    return self._error(403, "viewers cannot download backups")
+                if match_dl and app.get("kind") in ("db", "compose"):
                     path = containers.backup_dir(name) / match_dl.group(1)
                     if not path.is_file():
                         return self._error(404, "no such backup")
@@ -361,6 +399,71 @@ def make_handler(dash: Dashboard):
                         return self._json({"unit": unit, "lines": collect.journal(unit, min(lines, 5000))})
                     return self._stream_journal(unit)
             return self._error(404, "unknown endpoint")
+
+        def _proxy(self, method: str, sid: str, rest: str, query: str) -> None:
+            """Forward an API call to a linked machine, streams included."""
+            if self.user != team.OWNER:
+                return self._error(403, "only the owner can manage other machines")
+            srv = fleet.servers().get(sid)
+            if srv is None:
+                return self._error(404, "no such machine")
+            if rest.endswith("/terminal"):
+                return self._error(501, "open the terminal on that machine's own dashboard")
+            body = None
+            if method == "POST":
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b"{}"
+                self._audit("remote " + rest.rsplit("/", 1)[-1], f"{sid}:{rest}")
+            stream = rest.endswith("/stream")
+            try:
+                resp = fleet.request(srv, method, rest + (f"?{query}" if query else ""), body, stream=stream)
+            except fleet.urllib.error.HTTPError as exc:
+                data = exc.read()
+                return self._send(exc.code, data, exc.headers.get("Content-Type", "application/json"))
+            except Exception as exc:  # noqa: BLE001
+                return self._error(502, f"{srv['name']} did not answer: {getattr(exc, 'reason', exc)}")
+            with resp:
+                ctype = resp.headers.get("Content-Type", "application/json")
+                if not stream:
+                    return self._send(resp.status, resp.read(), ctype,
+                                      {k: v for k, v in resp.headers.items() if k == "Content-Disposition"})
+                self._sse_start()
+                try:
+                    while True:
+                        chunk = resp.readline()
+                        if not chunk:
+                            return
+                        self.wfile.write(chunk)
+                        if chunk in (b"\n", b"\r\n"):
+                            self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+
+        def _terminal(self, name: str, app: dict) -> None:
+            if self.headers.get("Upgrade", "").lower() != "websocket":
+                return self._error(426, "this endpoint speaks WebSocket")
+            if self.user != team.OWNER:
+                return self._error(403, "only the owner can open a terminal")
+            # Cross-site WebSocket hijacking: browsers send cookies with any
+            # WebSocket, so the page that opens it must be this dashboard.
+            origin = urllib.parse.urlsplit(self.headers.get("Origin", "")).netloc
+            if not origin or origin != self.headers.get("Host", ""):
+                return self._error(403, "terminal must be opened from this dashboard")
+            if app.get("adopted"):
+                return self._error(409, "hoist does not know where this process runs")
+            key = self.headers.get("Sec-WebSocket-Key", "")
+            if not key:
+                return self._error(400, "missing Sec-WebSocket-Key")
+            argv, env, cwd = terminal.shell_command(name, app)
+            team.audit(self.user, "open terminal", name)
+            self.send_response(101, "Switching Protocols")
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", terminal.accept_key(key))
+            self.end_headers()
+            self.wfile.flush()
+            self.close_connection = True
+            terminal.bridge(self.rfile, self.wfile, argv, env, cwd)
 
         def _stream_job(self, job) -> None:
             self._sse_start()
@@ -420,6 +523,44 @@ def make_handler(dash: Dashboard):
 
         # -- POST endpoints -------------------------------------------------------
 
+        def _webhook(self, name: str) -> None:
+            """A push from GitHub or GitLab: verify it, then deploy right away.
+
+            No cookie here -- the forge cannot have one. The request must be
+            signed with the app's own secret (GitHub's X-Hub-Signature-256,
+            or GitLab's X-Gitlab-Token), compared in constant time.
+            """
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 5_000_000:
+                return self._error(413, "payload too large")
+            raw = self.rfile.read(length) if length else b""
+            app = dash.app(name)
+            secret = ((app or {}).get("repo") or {}).get("webhook_secret")
+            if not secret:
+                time.sleep(0.5)
+                return self._error(404, "no webhook for this app")
+            signature = self.headers.get("X-Hub-Signature-256", "")
+            expected = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+            gitlab = self.headers.get("X-Gitlab-Token", "")
+            if not (hmac.compare_digest(signature, expected) or (gitlab and hmac.compare_digest(gitlab, secret))):
+                time.sleep(0.5)
+                return self._error(401, "bad signature")
+            event = self.headers.get("X-GitHub-Event") or self.headers.get("X-Gitlab-Event") or ""
+            if event in ("ping",):
+                return self._json({"ok": True, "pong": True})
+            try:
+                payload = json.loads(raw or b"{}")
+            except json.JSONDecodeError:
+                return self._error(400, "payload is not JSON")
+            ref = str(payload.get("ref", ""))
+            branch = app["repo"]["branch"]
+            previews = bool(app["repo"].get("previews"))
+            if ref != f"refs/heads/{branch}" and not previews:
+                return self._json({"ok": True, "ignored": f"push to {ref}, watching {branch}"})
+            team.audit("webhook", "push received", name, ref)
+            job = dash.jobs.start(f"Deploy {name} (webhook)", ["sync", name, "--wait"], name, "webhook")
+            return self._json({"ok": True, "job": job.id}, 202)
+
         def _audit(self, action: str, target: str | None = None, detail: str = "") -> None:
             team.audit(self.user or "?", action, target, detail)
 
@@ -440,6 +581,23 @@ def make_handler(dash: Dashboard):
                 self._audit("create from template", name, tid)
                 job = dash.jobs.start(f"Start {containers.TEMPLATES[tid]['label']} as {name}", args, name, self.user)
                 return self._json({"job": job.as_dict(), "app": name}, 202)
+            if path == "/api/servers":
+                if self.user != team.OWNER:
+                    return self._error(403, "only the owner can link machines")
+                try:
+                    srv = fleet.add(str(body.get("name", "")), str(body.get("url", "")), str(body.get("token", "")))
+                except fleet.FleetError as exc:
+                    raise ValueError(str(exc)) from exc
+                self._audit("link machine", srv["id"], srv["url"])
+                return self._json(srv)
+            match = re.fullmatch(r"/api/servers/([a-z0-9-]+)/remove", path)
+            if match:
+                if self.user != team.OWNER:
+                    return self._error(403, "only the owner can unlink machines")
+                if not fleet.remove(match.group(1)):
+                    return self._error(404, "no such machine")
+                self._audit("unlink machine", match.group(1))
+                return self._json({"ok": True})
             if path == "/api/databases":
                 engine = str(body.get("engine", ""))
                 if engine not in containers.ENGINES:
@@ -457,12 +615,20 @@ def make_handler(dash: Dashboard):
                 if self.user != team.OWNER:
                     return self._error(403, "only the owner can add people")
                 name = str(body.get("name", ""))
-                token = team.add(name)
-                self._audit("add teammate", name.strip().lower())
+                role = str(body.get("role", "member"))
+                token = team.add(name, role)
+                self._audit("add teammate", name.strip().lower(), role)
                 base = str(body.get("origin") or "").rstrip("/")
                 if not re.match(r"^https?://[^/\s]+$", base):
                     base = ""
                 return self._json({"name": name.strip().lower(), "link": f"{base}/?token={token}"})
+            match = re.fullmatch(r"/api/team/([a-z][a-z0-9_-]{0,23})/role", path)
+            if match:
+                if self.user != team.OWNER:
+                    return self._error(403, "only the owner can change roles")
+                team.set_role(match.group(1), str(body.get("role", "")))
+                self._audit("change role", match.group(1), str(body.get("role", "")))
+                return self._json({"ok": True})
             match = re.fullmatch(r"/api/team/([a-z][a-z0-9_-]{0,23})/remove", path)
             if match:
                 if self.user != team.OWNER:
@@ -474,8 +640,8 @@ def make_handler(dash: Dashboard):
             if path == "/api/notify":
                 self._audit("set notifications", None, "webhook on" if body.get("url") else "off")
                 url = str(body.get("url") or "").strip()
-                if url and (not url.startswith(("https://", "http://")) or len(url) > 2000):
-                    raise ValueError("expected a webhook URL starting with https://")
+                if url and (not url.startswith(("https://", "http://", "smtp://", "smtps://")) or len(url) > 2000):
+                    raise ValueError("expected a webhook URL (https://…) or email (smtps://user:pass@host:465/?to=…)")
                 with config.transaction() as state:
                     if url:
                         state["notify"] = {"url": url}
@@ -549,8 +715,8 @@ def make_handler(dash: Dashboard):
                 job = dash.jobs.start(f"Run in {name}", ["exec", name, "--", command], name, self.user)
                 return self._json({"job": job.as_dict()}, 202)
             if action in ("backup", "restore", "backup-schedule"):
-                if app.get("kind") != "db":
-                    return self._error(400, "only databases have backups")
+                if app.get("kind") not in ("db", "compose"):
+                    return self._error(400, "only databases and Docker stacks have backups")
                 if action == "backup":
                     job = dash.jobs.start(f"Back up {name}", ["backup", name], name, self.user)
                     return self._json({"job": job.as_dict()}, 202)
@@ -562,6 +728,18 @@ def make_handler(dash: Dashboard):
                                           name, self.user)
                     return self._json({"job": job.as_dict()}, 202)
                 return self._run_quick(["backup", name, "--daily" if body.get("on") else "--no-schedule"])
+            if action == "webhook":
+                if not app.get("repo"):
+                    return self._error(400, "only apps deployed from git have webhooks")
+                if self.user != team.OWNER:
+                    return self._error(403, "only the owner can issue a webhook secret")
+                secret = secrets.token_hex(20)
+                with config.transaction() as state:
+                    state["apps"][name]["repo"]["webhook_secret"] = secret
+                base = str(body.get("origin") or "").rstrip("/")
+                if not re.match(r"^https?://[^/\s]+$", base):
+                    base = ""
+                return self._json({"url": f"{base}/hooks/{name}", "secret": secret})
             if action == "previews":
                 return self._run_quick(["previews", name, "on" if body.get("on") else "off"])
             if action == "limits":
@@ -661,6 +839,29 @@ def make_handler(dash: Dashboard):
             return self._json({"job": job.as_dict(), "app": app_name}, 202)
 
     return Handler
+
+
+_URL_SECRET = re.compile(r"(://[^:/@]*:)[^@]+@")
+
+
+def redact(detail: dict) -> dict:
+    """What a viewer may see of an app: everything but secrets."""
+    detail = dict(detail)
+    detail["env"] = {k: "••••••" for k in (detail.get("env") or {})}
+    if detail.get("row"):
+        detail["row"] = _redact_row(detail["row"])
+    return detail
+
+
+def _redact_row(row: dict) -> dict:
+    row = dict(row)
+    if row.get("db"):
+        row["db"] = dict(row["db"], url=_URL_SECRET.sub(r"\1••••••@", row["db"].get("url") or ""))
+    return row
+
+
+def redact_state(snap: dict) -> dict:
+    return dict(snap, apps=[_redact_row(r) for r in snap.get("apps", [])])
 
 
 def qr_svg(text: str) -> str:

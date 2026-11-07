@@ -18,6 +18,8 @@ TIMEOUT = 8.0
 
 
 def kind(url: str) -> str:
+    if url.startswith(("smtp://", "smtps://")):
+        return "email"
     host = urllib.parse.urlsplit(url).netloc.lower()
     path = urllib.parse.urlsplit(url).path
     if host.endswith("discord.com") or host.endswith("discordapp.com"):
@@ -51,6 +53,42 @@ def _request(url: str, title: str, text: str, level: str, app: str | None) -> ur
     return urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers=headers)
 
 
+def _email(url: str, title: str, text: str) -> tuple[bool, str]:
+    """smtps://user:password@smtp.gmail.com:465/?to=team@example.com[,more]&from=…"""
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+
+    parts = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qs(parts.query)
+    to = [a for v in query.get("to", []) for a in v.split(",") if a]
+    if not to:
+        return False, "the email URL needs ?to=address"
+    user = urllib.parse.unquote(parts.username or "")
+    password = urllib.parse.unquote(parts.password or "")
+    sender = (query.get("from") or [user or "hoist@localhost"])[0]
+    msg = EmailMessage()
+    msg["Subject"] = f"[hoist] {title}"
+    msg["From"] = sender
+    msg["To"] = ", ".join(to)
+    msg.set_content(f"{title}\n\n{text}\n\n— hoist")
+    try:
+        if parts.scheme == "smtps":
+            server = smtplib.SMTP_SSL(parts.hostname, parts.port or 465, timeout=TIMEOUT,
+                                      context=ssl.create_default_context())
+        else:
+            server = smtplib.SMTP(parts.hostname, parts.port or 587, timeout=TIMEOUT)
+            if (parts.port or 587) != 25 and (query.get("starttls") or ["yes"])[0] != "no":
+                server.starttls(context=ssl.create_default_context())
+        with server:
+            if user:
+                server.login(user, password)
+            server.send_message(msg)
+        return True, f"email to {len(to)} address(es)"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)[:200]
+
+
 def send(title: str, text: str = "", level: str = "info", app: str | None = None,
          url: str | None = None, wait: bool = True) -> tuple[bool, str]:
     """Post one notification. Never raises: a broken webhook must not break a deploy."""
@@ -59,6 +97,8 @@ def send(title: str, text: str = "", level: str = "info", app: str | None = None
         return False, "no webhook configured"
 
     def go() -> tuple[bool, str]:
+        if kind(url) == "email":
+            return _email(url, title, text)
         try:
             with urllib.request.urlopen(_request(url, title, text, level, app), timeout=TIMEOUT) as r:
                 return True, f"HTTP {r.status}"

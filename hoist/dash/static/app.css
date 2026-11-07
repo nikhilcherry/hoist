@@ -112,6 +112,8 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
 .brand { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 8px; margin-bottom: 8px; text-decoration: none; }
 .brand svg { flex: none; }
 .brand-name { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
+.brand-host { cursor: pointer; border-radius: 6px; padding: 2px 6px; margin-right: -6px; }
+.brand-host:hover { background: var(--active); color: var(--text); }
 .brand-host { margin-left: auto; font-size: var(--fs-small); color: var(--muted); max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
@@ -587,3 +589,7 @@ a.feed-item:hover { background: var(--raised); }
 .tpl:hover { background: var(--raised); }
 .tpl:has(input:checked) { border-color: var(--text); background: var(--raised); }
 .tpl input { margin-top: 3px; accent-color: var(--text); }
+
+/* viewers see everything but every control that changes something is hidden */
+body.viewer [data-action]:not([data-action="copy"]):not([data-action="qr"]):not([data-action="show-job"]):not([data-action="theme"]):not([data-action="logout"]):not([data-action="reveal-db"]):not([data-action="deploy-log"]),
+body.viewer #console-form, body.viewer #limits-form button, body.viewer .env-foot, body.viewer #link-form, body.viewer #notify-form .actions { display: none !important; }

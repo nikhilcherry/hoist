@@ -507,7 +507,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     lock_path.mkdir(parents=True, exist_ok=True)
     lock = open(lock_path / ".deploy-lock", "a+")
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | (0 if manual else fcntl.LOCK_NB))
+        fcntl.flock(lock, fcntl.LOCK_EX | (0 if manual or getattr(args, "wait", False) else fcntl.LOCK_NB))
     except BlockingIOError:
         return 0  # a deploy is already running; the next tick re-checks
 
@@ -673,6 +673,31 @@ def _reconcile_previews(name: str, app: dict) -> None:
             notify.send(f"Preview of {branch} failed to build", f"{pname} — fix the branch and push again.",
                         level="bad", app=name)
         break  # one new preview per tick
+
+
+def cmd_webhook(args: argparse.Namespace) -> int:
+    import secrets as _secrets
+    with config.transaction() as state:
+        app = config.get_app(state, args.name)
+        if app is None or not app.get("repo"):
+            raise UserError(f"{args.name!r} is not deployed from git")
+        if args.off:
+            app["repo"].pop("webhook_secret", None)
+            secret = None
+        else:
+            secret = _secrets.token_hex(20)
+            app["repo"]["webhook_secret"] = secret
+        base = (state.get("dash_url") or "https://<your published dashboard>").rstrip("/")
+    if secret is None:
+        ui.ok("webhook removed; pushes are picked up by the 20 s check")
+        return 0
+    ui.ok("add this webhook to the repo (GitHub: Settings → Webhooks; content type application/json):")
+    ui.step(f"Payload URL   {base}/hooks/{args.name}")
+    ui.step(f"Secret        {secret}")
+    ui.step("pushes then deploy within seconds; the 20 s check stays on as a fallback")
+    if "<" in base:
+        ui.step("the dashboard must be reachable by GitHub: hoist dash --public dash")
+    return 0
 
 
 def cmd_previews(args: argparse.Namespace) -> int:
@@ -992,7 +1017,12 @@ def cmd_template(args: argparse.Namespace) -> int:
         raise UserError(f"{name} already exists — pick another --name")
     folder = containers.template_dir(name)
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "compose.yml").write_text(containers.template_compose(args.id))
+    values = containers.template_secrets(args.id)
+    compose = folder / "compose.yml"
+    fd = os.open(compose, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(containers.template_compose(args.id, values))
+    needs_password = any("{password}" in v for v in (spec.get("env") or {}).values())
     ui.info(f"{ui.bold(name)} {ui.dim('·')} {spec['label']} {ui.dim('·')} {spec['image']}")
     try:
         containers.pull(spec["image"], log=ui.step)
@@ -1006,13 +1036,15 @@ def cmd_template(args: argparse.Namespace) -> int:
     with config.transaction() as state:
         if name in state["apps"]:
             state["apps"][name]["template"] = args.id
+    if needs_password:
+        ui.ok(f"password for {spec['label']}: {values['password']}  (shown once; it is in {compose})")
     return code
 
 
 def _db_app(name: str) -> dict:
     app = config.get_app(config.load(), name)
-    if app is None or app.get("kind") != "db":
-        raise UserError(f"{name!r} is not a hoist database")
+    if app is None or app.get("kind") not in ("db", "compose"):
+        raise UserError(f"{name!r} is not a database or a Docker stack, so it has nothing hoist can back up")
     return app
 
 
@@ -1021,7 +1053,8 @@ def cmd_backup(args: argparse.Namespace) -> int:
     base = containers.backup_unit_base(args.name)
     if args.offsite:
         with config.transaction() as state:
-            db = state["apps"][args.name]["db"]
+            db = state["apps"][args.name].setdefault("db", {}) if app.get("kind") == "db" \
+                else state["apps"][args.name].setdefault("backup", {})
             if args.offsite == "off":
                 db.pop("offsite", None)
             else:
@@ -1039,7 +1072,8 @@ def cmd_backup(args: argparse.Namespace) -> int:
             service.systemctl("daemon-reload")
             service.systemctl("enable", "--now", f"{base}.timer")
             with config.transaction() as state:
-                state["apps"][args.name]["db"]["daily_backup"] = True
+                holder = "db" if app.get("kind") == "db" else "backup"
+                state["apps"][args.name].setdefault(holder, {})["daily_backup"] = True
             ui.ok(f"{args.name} is backed up every day; the newest {containers.BACKUP_KEEP} are kept")
         else:
             service.systemctl("disable", "--now", f"{base}.timer")
@@ -1047,7 +1081,8 @@ def cmd_backup(args: argparse.Namespace) -> int:
                 (service.UNIT_DIR / f"{base}{suffix}").unlink(missing_ok=True)
             service.systemctl("daemon-reload")
             with config.transaction() as state:
-                state["apps"][args.name]["db"].pop("daily_backup", None)
+                holder = "db" if app.get("kind") == "db" else "backup"
+                state["apps"][args.name].setdefault(holder, {}).pop("daily_backup", None)
             ui.ok(f"daily backups of {args.name} turned off (existing files kept)")
         return 0
     if args.list:
@@ -1063,12 +1098,21 @@ def cmd_backup(args: argparse.Namespace) -> int:
         if not target.is_file():
             raise UserError(f"no backup called {args.restore!r} — see hoist backup {args.name} --list")
         ui.step(f"restoring {target.name} into {args.name}")
-        containers.restore(args.name, app["db"], target, service.systemctl)
+        if app.get("kind") == "compose":
+            containers.restore_volumes(args.name, target, service.systemctl)
+        else:
+            containers.restore(args.name, app["db"], target, service.systemctl)
         ui.ok(f"{args.name} restored from {target.name}")
         notify.send(f"{args.name} restored from a backup", target.name, level="warn", app=args.name)
         return 0
     try:
-        path = containers.backup(args.name, app["db"])
+        if app.get("kind") == "compose":
+            path = containers.backup_volumes(args.name, log=ui.step)
+            offsite = (app.get("backup") or {}).get("offsite")
+            if offsite:
+                containers.copy_offsite(path, offsite, args.name)
+        else:
+            path = containers.backup(args.name, app["db"])
     except containers.ContainerError as exc:
         notify.send(f"Backup of {args.name} failed", str(exc), level="bad", app=args.name)
         raise UserError(str(exc)) from exc
@@ -1142,8 +1186,8 @@ def cmd_notify(args: argparse.Namespace) -> int:
         ui.ok("notifications off")
         return 0
     if args.url:
-        if not args.url.startswith(("https://", "http://")):
-            raise UserError("expected a webhook URL starting with https://")
+        if not args.url.startswith(("https://", "http://", "smtp://", "smtps://")):
+            raise UserError("expected a webhook URL (https://…) or an email URL (smtps://user:pass@host:465/?to=…)")
         state["notify"] = {"url": args.url}
         config.save(state)
         ui.ok(f"notifications go to a {notify.kind(args.url)} webhook")
@@ -1195,7 +1239,7 @@ def cmd_dash(args: argparse.Namespace) -> int:
     base = (config.load().get("dash_url") or f"http://127.0.0.1:{port}").rstrip("/")
     if args.add_user:
         try:
-            member = team.add(args.add_user)
+            member = team.add(args.add_user, args.role)
         except team.TeamError as exc:
             raise UserError(str(exc)) from exc
         team.audit("owner", "add teammate", args.add_user.lower(), "from the CLI")
@@ -1210,7 +1254,7 @@ def cmd_dash(args: argparse.Namespace) -> int:
         return 0
     if args.users:
         people = team.users()
-        ui.table([["owner", "owner", "—"]] + [[n, "member", i.get("added", "")] for n, i in sorted(people.items())],
+        ui.table([["owner", "owner", "—"]] + [[n, i.get("role", "member"), i.get("added", "")] for n, i in sorted(people.items())],
                  ["NAME", "ROLE", "ADDED"])
         return 0
 
@@ -1321,6 +1365,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("name")
     sync.add_argument("--force", action="store_true", help="rebuild even if up to date")
     sync.add_argument("--to", metavar="SHA", help="roll back to this commit (pauses auto-deploy)")
+    sync.add_argument("--wait", action="store_true",
+                      help="if a deploy is running, wait for it instead of skipping (used by webhooks)")
     sync.set_defaults(func=cmd_sync)
 
     for verb, func, text in (
@@ -1400,6 +1446,11 @@ def build_parser() -> argparse.ArgumentParser:
     link.add_argument("--var", help="variable name (default: DATABASE_URL, REDIS_URL...)")
     link.set_defaults(func=cmd_link)
 
+    hook = sub.add_parser("webhook", help="deploy within seconds of a push (GitHub/GitLab webhook)")
+    hook.add_argument("name")
+    hook.add_argument("--off", action="store_true")
+    hook.set_defaults(func=cmd_webhook)
+
     prev = sub.add_parser("previews", help="give every branch its own preview app")
     prev.add_argument("name")
     prev.add_argument("state", choices=["on", "off"])
@@ -1426,6 +1477,8 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--stop", action="store_true", help="stop and remove the dashboard service")
     dash.add_argument("--reset-token", action="store_true", help="sign every browser out")
     dash.add_argument("--add-user", metavar="NAME", help="give a teammate their own sign-in link")
+    dash.add_argument("--role", default="member", choices=["member", "viewer"],
+                      help="with --add-user: member (deploy and operate) or viewer (read only)")
     dash.add_argument("--remove-user", metavar="NAME", help="revoke a teammate's link")
     dash.add_argument("--users", action="store_true", help="list who has access")
     dash.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)

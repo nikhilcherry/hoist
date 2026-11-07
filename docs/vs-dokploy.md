@@ -26,7 +26,7 @@ Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026
 
 | | hoist | Dokploy | Notes |
 | --- | :-: | :-: | --- |
-| Deploy on `git push` | ✓ | ✓ | hoist polls every 20 s (no inbound webhook needed); Dokploy uses webhooks, so it is faster to react |
+| Deploy on `git push` | ✓ | ✓ | hoist: a signed GitHub/GitLab webhook goes live in **0.27 s** (median of 5, below), with a 20 s poll as fallback that needs no inbound access |
 | Builds | ◐ | ✓ | hoist: npm/pnpm/yarn, Python venv, Procfile, Dockerfile, Compose. Dokploy adds Nixpacks and Heroku/Paketo buildpacks |
 | Docker Compose stacks | ✓ | ✓ | hoist builds a stack before it goes live, so a broken Dockerfile never replaces the running one |
 | A failed build never takes the app down | ✓ | — | hoist builds each commit in its own release and swaps a symlink only on success; Dokploy documents automatic rollback on failed Swarm health checks |
@@ -35,20 +35,41 @@ Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026
 | Databases | ✓ | ✓ | Both: PostgreSQL, MySQL, MariaDB, MongoDB, Redis; Dokploy also LibSQL (seen in its own database schema). hoist binds them to 127.0.0.1 with a generated password and a private volume |
 | Link a database to an app | ✓ | — | `hoist link db app` / one button writes `DATABASE_URL` (or `REDIS_URL`…) and restarts the app |
 | Database backups | ✓ | ✓ | hoist: daily, keep 10, restore, download, copy off-site to any rclone remote (S3, R2, B2, Drive) |
-| Volume backups (non-database) | ✗ | ✓ | |
-| One-click app templates | ◐ | ✓ | hoist ships 7 (Uptime Kuma, n8n, ntfy, Excalidraw, PocketBase, Metabase, Open WebUI); Dokploy's catalogue is far larger |
+| Volume backups (non-database) | ✓ | ✓ | hoist archives every volume of a Docker stack in one file, with its containers paused for consistency; restore and download |
+| One-click app templates | ◐ | ✓ | hoist ships 24 (Uptime Kuma, n8n, Gitea, code-server, MinIO, Grafana, Jupyter, Directus, Open WebUI…), with generated passwords; Dokploy's catalogue is larger |
 | Environment variables | ✓ | ✓ | hoist: editor, paste a `.env`, values hidden by default, unit files `0600` |
 | Resource limits | ✓ | ✓ | hoist: memory and CPU; on containers they go to Docker, not to systemd |
 | Live logs | ✓ | ✓ | hoist: app output and the deploy log, search, follow, download |
-| Run a command in the app | ◐ | ✓ | hoist: one command at a time with streamed output; Dokploy: an interactive terminal |
+| Terminal in the app | ✓ | ✓ | hoist: an interactive terminal (PTY over WebSocket, xterm.js bundled) in the app's folder, database container or stack; plus one-shot commands |
 | CPU, memory, disk, network | ✓ | ✓ | hoist measures containers from their cgroups, not the docker client |
 | External uptime checks of each public URL | ✓ | — | every 30 s, with a one-hour strip and "why it is down" in plain words |
-| Notifications | ✓ | ✓ | hoist: Discord, Slack, Telegram, ntfy, any JSON webhook; Dokploy also sends email |
-| Team accounts | ◐ | ✓ | hoist: one owner, any number of members with their own links, an audit log; Dokploy has finer-grained permissions |
+| Notifications | ✓ | ✓ | hoist: Discord, Slack, Telegram, ntfy, email (SMTP) and any JSON webhook |
+| Team accounts and roles | ◐ | ✓ | hoist: owner, member (deploy and operate) and viewer (read only, secrets redacted), each with their own link; Dokploy documents finer-grained per-user permissions |
 | Audit log | ✓ | — | who deployed, rolled back, changed env (values never logged), ran a command |
 | QR code for every app | ✓ | — | for putting the demo on a judge's phone |
-| Several servers / clustering | ✗ | ✓ | Dokploy can deploy to remote servers and scale across a Swarm. hoist runs one machine, by design |
+| Several servers | ◐ | ✓ | hoist: link other machines' dashboards and manage them all from one (apps, deploys, logs, databases, backups), tokens kept server-side. Dokploy also scales one app across a Swarm cluster; hoist does not |
 | Command palette, light and dark | ✓ | — | |
+
+## Measured: push to live
+
+`scripts/bench_deploy.sh` makes a throwaway repo, deploys it with hoist, pushes
+a change and times how long until the new page is served. On the test laptop:
+
+| Trigger | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+| --- | --: | --: | --: | --: | --: |
+| GitHub-style webhook | 273 ms | 266 ms | 267 ms | 284 ms | 296 ms |
+| 20 s poll (no webhook) | 4.8 s | 21.0 s | 20.6 s | 21.5 s | 21.0 s |
+
+A failed build is measured by the test suite instead of a timer: the live
+release's files are checked untouched after a build that deletes them and
+exits non-zero (`test_a_broken_build_never_touches_the_files_being_served`).
+
+## What Dokploy still does that hoist does not
+
+- Scale one app across a Docker Swarm cluster (hoist links separate machines; it does not schedule one app over them).
+- Nixpacks and Heroku/Paketo buildpacks. hoist detects npm/pnpm/yarn, Python, Procfile, Dockerfile and Compose, and does not install third-party build tooling.
+- A larger template catalogue (hoist ships 24).
+- Finer-grained per-user permissions than owner, member and viewer.
 
 ## When to use which
 

@@ -22,6 +22,17 @@ from .. import config
 
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
 OWNER = "owner"
+ROLES = ("member", "viewer")  # member: deploy and operate; viewer: read only
+
+
+def role_of(name: str | None) -> str | None:
+    if name is None:
+        return None
+    if name == OWNER:
+        return OWNER
+    return users().get(name, {}).get("role", "member")
+
+
 _lock = threading.Lock()
 
 
@@ -57,8 +68,10 @@ def users() -> dict[str, dict]:
         return {}
 
 
-def add(name: str) -> str:
+def add(name: str, role: str = "member") -> str:
     name = name.strip().lower()
+    if role not in ROLES:
+        raise TeamError(f"role must be one of {', '.join(ROLES)}")
     if not NAME.match(name) or name == OWNER:
         raise TeamError("a name is lowercase letters, digits, - or _, up to 24, and not 'owner'")
     with _lock:
@@ -66,9 +79,20 @@ def add(name: str) -> str:
         if name in everyone:
             raise TeamError(f"{name} already has access — remove them first to issue a new link")
         token = secrets.token_urlsafe(24)
-        everyone[name] = {"hash": _hash(token), "added": config.now()}
+        everyone[name] = {"hash": _hash(token), "added": config.now(), "role": role}
         _write_private(users_path(), json.dumps({"users": everyone}, indent=2) + "\n")
     return token
+
+
+def set_role(name: str, role: str) -> None:
+    if role not in ROLES:
+        raise TeamError(f"role must be one of {', '.join(ROLES)}")
+    with _lock:
+        everyone = users()
+        if name not in everyone:
+            raise TeamError(f"no teammate called {name!r}")
+        everyone[name]["role"] = role
+        _write_private(users_path(), json.dumps({"users": everyone}, indent=2) + "\n")
 
 
 def remove(name: str) -> bool:
