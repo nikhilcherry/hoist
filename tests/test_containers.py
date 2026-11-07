@@ -75,6 +75,7 @@ def test_a_lone_dockerfile_is_wrapped_with_its_exposed_port(tmp_path):
     path = containers.ensure_dockerfile_compose(tmp_path)
     text = path.read_text()
     assert "build: ." in text and "127.0.0.1:${PORT}:8000" in text
+    assert "init: true" in text  # else every stop waits 10 s for a SIGTERM the app ignores
     assert containers.compose_uses_port_var(path)
     assert "-f compose.hoist.yml" in containers.compose_up_command("web", generated=True)
 
@@ -178,4 +179,5 @@ def test_buildpack_steps_and_compose_wrapper(tmp_path):
     path = containers.ensure_buildpack_compose(tmp_path, "api")
     text = path.read_text()
     assert "image: hoist-api:latest" in text and "127.0.0.1:${PORT}:8080" in text and 'PORT: "8080"' in text
+    assert "init: true" in text
     assert containers.compose_uses_port_var(path)
