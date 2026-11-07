@@ -63,18 +63,20 @@ database at once could corrupt it.
 | On disk | **0.9 MB** | **5.4 GB** (dokploy 4.51, postgres 0.64, traefik 0.25) |
 | Needs | Python, systemd; Docker only for container apps | root, Docker Swarm, ports 80, 443 and 3000 |
 | Idle memory | **29.6 MiB** | 638 MiB (dokploy 500, postgres 115, traefik 23) |
-| Idle CPU, nothing watching | 0.30 % (+ 0.02 % per seamless app) | **≈ 0.1 %** (0.07 + 0.00 + 0.03) |
+| Idle CPU, nothing watching | **0.07 %** (0.17 % with an alert webhook set; +0.02 % per container app) | ≈ 0.1 % (0.07 + 0.00 + 0.03) |
 | Dashboard first load | **283 ms, 18 requests, 460 KB** | 958 ms, 118 requests, 7.2 MB |
 | API call (list of apps), median | **3.5 ms** (p95 5.3) | 24.1 ms (p95 36.8) |
 
-**hoist idles at more CPU than Dokploy.** The figure first published here
-(0.33 %) was wrong: it counted only hoist's own process and missed the
-`systemctl` and `docker` child processes its monitor spawns on every sample.
-Counted properly it was **0.70 %** of a core. The monitor now samples every 15 s
-when nobody has the dashboard open (3 s while someone does), which brought it to
-**0.30 %**. What remains is mostly the uptime check of each public URL every
-30 s, a feature Dokploy does not have. Dokploy's figure is `docker stats` over
-its three containers, so it includes all their processes.
+**Idle CPU took three steps to get here, and the first figure was wrong.** The
+number first published here (0.33 %) counted only hoist's own process and missed the
+`systemctl` and `docker` child processes its monitor spawns; counted properly it was
+**0.70 %**. Sampling every 15 s when nobody is watching brought it to 0.30 %, and the
+rest was probing every public URL every 30 s although nothing reads the results unless
+someone is watching or an alert webhook is configured. Probes are now taken only then
+(a viewer gets fresh ones immediately), giving **0.07 %**. With an alert webhook set the
+probes must run, so it is **0.17 %**. Dokploy's figure is `docker stats` over its three
+containers, so it includes all their processes. At 0.07 % the two are within noise of
+each other; I would not call either one a win.
 
 ## What this found about hoist
 
