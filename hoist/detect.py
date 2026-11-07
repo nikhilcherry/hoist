@@ -14,7 +14,8 @@ STATIC_SERVE = "{python} -m http.server $PORT --bind 127.0.0.1"
 
 
 COMPOSE = "<compose>"
-DOCKERFILE = "<dockerfile>"  # placeholder; cli turns it into `docker compose up` for the app
+DOCKERFILE = "<dockerfile>"
+BUILDPACK = "<buildpack>"  # placeholder; cli turns it into `docker compose up` for the app
 
 
 class DetectionError(Exception):

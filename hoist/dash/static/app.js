@@ -253,6 +253,24 @@ function refresh() {
 }
 const part = (key, cls = "") => `<div data-part="${key}" class="${cls}"></div>`;
 
+// Hide every control the signed-in person may not use. The server enforces the
+// same rules; this only keeps the page from offering buttons that would be refused.
+const ACTION_CAP = { "new-app": "deploy", "new-db": "deploy", redeploy: "deploy", rollback: "deploy", webhook: "deploy",
+  restart: "operate", stop: "operate", start: "operate", pause: "operate", resume: "operate", previews: "operate",
+  backup: "backups", restore: "backups", "backup-schedule": "backups", delete: "delete" };
+const CONFIG_UI = "#limits-form button, .env-foot, #link-form, #notify-form .actions";
+function applyPermissions(s) {
+  let style = $("#perm-style");
+  if (!style) { style = document.createElement("style"); style.id = "perm-style"; document.head.appendChild(style); }
+  if (!s || s.me === "owner" || !s.can) { style.textContent = ""; return; }
+  const can = new Set(s.can);
+  const rules = [];
+  for (const [action, cap] of Object.entries(ACTION_CAP)) if (!can.has(cap)) rules.push(`[data-action="${action}"]`);
+  if (!can.has("config")) rules.push(CONFIG_UI);
+  if (!can.has("secrets")) rules.push("a[download]", '[data-action="reveal-db"]');
+  style.textContent = rules.length ? `${rules.join(",")} { display: none !important; }` : "";
+}
+
 // ── chrome: nav, crumbs, footer ─────────────────────────────────────────────
 
 function paintChrome() {
@@ -262,6 +280,7 @@ function paintChrome() {
   $("#brand-host").title = currentServer === "local" ? "This machine" : `Linked machine — managed through this dashboard`;
   document.body.classList.toggle("remote", currentServer !== "local");
   document.body.classList.toggle("viewer", s?.role === "viewer");
+  applyPermissions(s);
   const all = s?.apps || [];
   const apps = all.filter((a) => a.kind !== "db");
   const dbs = all.filter((a) => a.kind === "db");

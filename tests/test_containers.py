@@ -110,3 +110,72 @@ def test_offsite_copy_to_a_folder(tmp_path):
 def test_every_template_publishes_its_port_on_localhost(tid):
     text = containers.template_compose(tid)
     assert "127.0.0.1:${PORT}:" in text and containers.TEMPLATES[tid]["image"] in text
+
+
+# --- the template catalogue -----------------------------------------------------
+
+
+def test_every_builtin_template_is_well_formed():
+    for tid, spec in containers.TEMPLATES.items():
+        assert containers.USER_TEMPLATE_ID.match(tid), tid
+        assert spec["label"] and spec["about"] and spec["image"] and isinstance(spec["port"], int), tid
+        assert ":" in spec["image"] or "/" in spec["image"], f"{tid}: image needs a tag"
+        text = containers.template_compose(tid)
+        assert text.startswith("services:") and "127.0.0.1:${PORT}:" in text, tid
+        if spec.get("data"):
+            assert "volumes:" in text and "data:" in text, tid
+
+
+def test_generated_passwords_are_fresh_and_never_left_as_placeholders():
+    a = containers.template_compose("pgadmin")
+    b = containers.template_compose("pgadmin")
+    assert "{password}" not in a and a != b
+    assert "{random}" not in containers.template_compose("directus")
+
+
+def test_a_compose_file_becomes_a_template_and_can_be_removed(tmp_path):
+    src = tmp_path / "mine.yml"
+    src.write_text("services:\n  web:\n    image: nginx:alpine\n    ports: ['127.0.0.1:${PORT}:80']\n")
+    info = containers.add_user_template("mine", str(src), "Mine", "my own")
+    assert info["images"] == ["nginx:alpine"]
+    assert containers.catalogue()["mine"]["user"] is True
+    assert containers.template_compose("mine") == src.read_text()  # runs exactly as written
+    assert (containers.user_template_dir() / "mine.yml").stat().st_mode & 0o077 == 0
+    assert containers.remove_user_template("mine") and "mine" not in containers.catalogue()
+
+
+def test_bad_template_sources_are_refused(tmp_path):
+    notcompose = tmp_path / "x.yml"
+    notcompose.write_text("hello: world\n")
+    huge = tmp_path / "huge.yml"
+    huge.write_text("services:\n" + "# pad\n" * 60000)
+    for tid, src in (("nginx", notcompose), ("ok-id", notcompose), ("ok-id", huge), ("Bad Id", notcompose)):
+        with pytest.raises(containers.ContainerError):
+            containers.add_user_template(tid, str(src), None, None)
+    with pytest.raises(containers.ContainerError):
+        containers.add_user_template("nope", str(tmp_path / "missing.yml"), None, None)
+
+
+# --- buildpacks (only with a tool the user already installed) -------------------
+
+
+def test_buildpack_tool_is_found_not_installed(monkeypatch):
+    have = {"pack"}
+    monkeypatch.setattr(containers.shutil, "which", lambda t: f"/usr/bin/{t}" if t in have else None)
+    assert containers.buildpack_tool() == "pack"
+    assert containers.buildpack_tool("nixpacks") is None  # asked for one that is not there
+    have.add("nixpacks")
+    assert containers.buildpack_tool() == "nixpacks"       # preferred when both exist
+    assert containers.buildpack_tool("pack") == "pack"
+    have.clear()
+    assert containers.buildpack_tool() is None             # never falls back to installing anything
+
+
+def test_buildpack_steps_and_compose_wrapper(tmp_path):
+    assert containers.buildpack_build_step("nixpacks", "api") == "nixpacks build . --name hoist-api:latest"
+    step = containers.buildpack_build_step("pack", "api")
+    assert step.startswith("pack build hoist-api:latest --builder ")
+    path = containers.ensure_buildpack_compose(tmp_path, "api")
+    text = path.read_text()
+    assert "image: hoist-api:latest" in text and "127.0.0.1:${PORT}:8080" in text and 'PORT: "8080"' in text
+    assert containers.compose_uses_port_var(path)

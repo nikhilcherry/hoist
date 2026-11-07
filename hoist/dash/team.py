@@ -22,15 +22,74 @@ from .. import config
 
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
 OWNER = "owner"
-ROLES = ("member", "viewer")  # member: deploy and operate; viewer: read only
+ROLES = ("member", "viewer", "custom")
+
+# What a person can be allowed to do. "view" is implied for everyone; the rest
+# are granted per person (a role is just a preset) and optionally limited to a
+# list of apps. The owner alone manages people, machines, terminals and commands.
+CAPS = {
+    "deploy": "Create apps, redeploy, roll back, set up webhooks",
+    "operate": "Restart, stop, start, pause auto-deploy, branch previews",
+    "config": "Edit environment variables, resource limits, links and notifications",
+    "backups": "Back up, restore and schedule database and volume backups",
+    "delete": "Take apps down",
+    "secrets": "See environment values, database passwords and download backups",
+}
+PRESETS = {"member": set(CAPS), "viewer": set()}
+ACTION_CAP = {
+    "redeploy": "deploy", "rollback": "deploy", "webhook": "deploy",
+    "restart": "operate", "stop": "operate", "start": "operate", "pause": "operate",
+    "resume": "operate", "previews": "operate",
+    "env": "config", "limits": "config", "link": "config",
+    "backup": "backups", "restore": "backups", "backup-schedule": "backups",
+    "delete": "delete",
+}
 
 
-def role_of(name: str | None) -> str | None:
+def access(name: str | None) -> dict | None:
+    """What this person may do: {"role", "caps": set, "apps": None|set}. None = not a person."""
     if name is None:
         return None
     if name == OWNER:
-        return OWNER
-    return users().get(name, {}).get("role", "member")
+        return {"role": OWNER, "caps": set(CAPS), "apps": None, "owner": True}
+    info = users().get(name)
+    if info is None:
+        return None
+    role = info.get("role", "member")
+    if role == "custom":
+        caps = {c for c in info.get("can", []) if c in CAPS}
+        apps = set(info.get("apps") or []) or None
+    else:
+        caps = set(PRESETS.get(role, set()))
+        apps = None
+    return {"role": role, "caps": caps, "apps": apps, "owner": False}
+
+
+def role_of(name: str | None) -> str | None:
+    a = access(name)
+    return a["role"] if a else None
+
+
+def allows(name: str | None, cap: str, app: str | None = None) -> bool:
+    """May `name` use capability `cap` (on `app`, or on the whole machine if None)?"""
+    a = access(name)
+    if a is None:
+        return False
+    if a["owner"]:
+        return True
+    if cap == "view":
+        return app is None or a["apps"] is None or app in a["apps"]
+    if cap not in a["caps"]:
+        return False
+    if a["apps"] is None:
+        return True
+    return app is not None and app in a["apps"]
+
+
+def scope(name: str | None) -> set[str] | None:
+    """The apps this person can see, or None for all of them."""
+    a = access(name)
+    return None if a is None or a["apps"] is None else set(a["apps"])
 
 
 _lock = threading.Lock()
@@ -68,10 +127,22 @@ def users() -> dict[str, dict]:
         return {}
 
 
-def add(name: str, role: str = "member") -> str:
-    name = name.strip().lower()
+def _custom(role: str, can: list[str] | None, apps: list[str] | None) -> dict:
     if role not in ROLES:
         raise TeamError(f"role must be one of {', '.join(ROLES)}")
+    if role != "custom":
+        return {"role": role}
+    unknown = [c for c in (can or []) if c not in CAPS]
+    if unknown:
+        raise TeamError(f"unknown permission {unknown[0]!r}; choose from {', '.join(CAPS)}")
+    can = list(can or [])
+    apps = [a for a in (apps or []) if re.match(r"^[a-z0-9][a-z0-9-]{0,39}$", a)]
+    return {"role": "custom", "can": sorted(set(can)), "apps": sorted(set(apps))}
+
+
+def add(name: str, role: str = "member", can: list[str] | None = None, apps: list[str] | None = None) -> str:
+    name = name.strip().lower()
+    entry = _custom(role, can, apps)
     if not NAME.match(name) or name == OWNER:
         raise TeamError("a name is lowercase letters, digits, - or _, up to 24, and not 'owner'")
     with _lock:
@@ -79,19 +150,19 @@ def add(name: str, role: str = "member") -> str:
         if name in everyone:
             raise TeamError(f"{name} already has access — remove them first to issue a new link")
         token = secrets.token_urlsafe(24)
-        everyone[name] = {"hash": _hash(token), "added": config.now(), "role": role}
+        everyone[name] = {"hash": _hash(token), "added": config.now(), **entry}
         _write_private(users_path(), json.dumps({"users": everyone}, indent=2) + "\n")
     return token
 
 
-def set_role(name: str, role: str) -> None:
-    if role not in ROLES:
-        raise TeamError(f"role must be one of {', '.join(ROLES)}")
+def set_role(name: str, role: str, can: list[str] | None = None, apps: list[str] | None = None) -> None:
+    entry = _custom(role, can, apps)
     with _lock:
         everyone = users()
         if name not in everyone:
             raise TeamError(f"no teammate called {name!r}")
-        everyone[name]["role"] = role
+        keep = {k: v for k, v in everyone[name].items() if k in ("hash", "added")}
+        everyone[name] = {**keep, **entry}
         _write_private(users_path(), json.dumps({"users": everyone}, indent=2) + "\n")
 
 

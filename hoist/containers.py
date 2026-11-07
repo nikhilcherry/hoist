@@ -253,6 +253,43 @@ def ensure_dockerfile_compose(directory: Path) -> Path:
     return path
 
 
+# --- buildpacks (only if you already have the tool) ------------------------------
+#
+# hoist never installs build tooling for you. If `nixpacks` or `pack` (Cloud
+# Native Buildpacks) is already on PATH, a project in any language can be built
+# into an image and run like any other Docker app.
+
+BUILDPACKS = ("nixpacks", "pack")
+PACK_BUILDER = "paketobuildpacks/builder-jammy-base"
+BUILDPACK_INNER_PORT = 8080
+
+
+def buildpack_tool(prefer: str | None = None) -> str | None:
+    """The buildpack tool to use, or None when none is installed."""
+    order = [prefer] if prefer in BUILDPACKS else list(BUILDPACKS)
+    return next((t for t in order if shutil.which(t)), None)
+
+
+def buildpack_image(app: str) -> str:
+    return f"hoist-{app}:latest"
+
+
+def buildpack_build_step(tool: str, app: str) -> str:
+    if tool == "nixpacks":
+        return f"nixpacks build . --name {shlex.quote(buildpack_image(app))}"
+    return f"pack build {shlex.quote(buildpack_image(app))} --builder {PACK_BUILDER}"
+
+
+def ensure_buildpack_compose(directory: Path, app: str) -> Path:
+    """A one-service compose file around the image the buildpack produces."""
+    path = directory / GENERATED_COMPOSE
+    path.write_text("# written by hoist for a project built with a buildpack\n"
+                    f"services:\n  app:\n    image: {buildpack_image(app)}\n"
+                    f'    ports: ["127.0.0.1:${{PORT}}:{BUILDPACK_INNER_PORT}"]\n'
+                    f'    environment:\n      PORT: "{BUILDPACK_INNER_PORT}"\n')
+    return path
+
+
 def compose_down(app: str, purge: bool = False) -> list[str]:
     """Stop and remove a stack. Its volumes are kept unless `purge`; returns the kept ones."""
     subprocess.run([*shlex.split(docker()), "compose", "-p", compose_project(app), "down",
@@ -431,10 +468,6 @@ TEMPLATES: dict[str, dict] = {
     "code-server": {"label": "code-server", "about": "VS Code in the browser for pair programming",
                     "image": "codercom/code-server:latest", "port": 8080, "data": "/home/coder",
                     "env": {"PASSWORD": "{password}"}},
-    "minio": {"label": "MinIO", "about": "S3-compatible file storage with a web console",
-              "image": "minio/minio:latest", "port": 9001, "data": "/data",
-              "command": ["server", "/data", "--console-address", ":9001"],
-              "env": {"MINIO_ROOT_USER": "hoist", "MINIO_ROOT_PASSWORD": "{password}"}},
     "mailpit": {"label": "Mailpit", "about": "Catch and read the emails your app sends while you build it",
                 "image": "axllent/mailpit:latest", "port": 8025},
     "it-tools": {"label": "IT Tools", "about": "Converters, encoders and generators developers keep googling",
@@ -470,10 +503,142 @@ TEMPLATES: dict[str, dict] = {
               "image": "ghost:5-alpine", "port": 2368, "data": "/var/lib/ghost/content",
               "env": {"NODE_ENV": "development", "database__client": "sqlite3",
                       "database__connection__filename": "/var/lib/ghost/content/data/ghost.db"}},
+    "vaultwarden": {"label": "Vaultwarden", "about": "Self-hosted password manager, Bitwarden compatible",
+                    "image": "vaultwarden/server:latest", "port": 80, "data": "/data"},
+    "adminer": {"label": "Adminer", "about": "Browse and edit any SQL database from a web page",
+                "image": "adminer:latest", "port": 8080},
+    "pgadmin": {"label": "pgAdmin", "about": "The full PostgreSQL admin console",
+                "image": "dpage/pgadmin4:latest", "port": 80, "data": "/var/lib/pgadmin",
+                "env": {"PGADMIN_DEFAULT_EMAIL": "admin@example.com", "PGADMIN_DEFAULT_PASSWORD": "{password}"}},
+    "redis-commander": {"label": "Redis Commander", "about": "Browse the keys of a Redis you started with hoist",
+                        "image": "rediscommander/redis-commander:latest", "port": 8081},
+    "drawio": {"label": "draw.io", "about": "Diagrams, flowcharts and architecture drawings",
+               "image": "jgraph/drawio:latest", "port": 8080},
+    "flowise": {"label": "Flowise", "about": "Build LLM chains and agents by dragging blocks",
+                "image": "flowiseai/flowise:latest", "port": 3000, "data": "/root/.flowise"},
+    "langflow": {"label": "Langflow", "about": "Visual builder for RAG pipelines and AI agents",
+                 "image": "langflowai/langflow:latest", "port": 7860, "data": "/app/langflow"},
+    "ollama": {"label": "Ollama (container)", "about": "Run open LLMs in Docker, with its own model store",
+               "image": "ollama/ollama:latest", "port": 11434, "data": "/root/.ollama"},
+    "chromadb": {"label": "Chroma", "about": "Vector database for embeddings and RAG",
+                 "image": "chromadb/chroma:latest", "port": 8000, "data": "/chroma/chroma"},
+    "qdrant": {"label": "Qdrant", "about": "Vector search engine with a REST and gRPC API",
+               "image": "qdrant/qdrant:latest", "port": 6333, "data": "/qdrant/storage"},
+    "whoami": {"label": "whoami", "about": "A tiny web server that prints its request: test routing and tunnels",
+               "image": "traefik/whoami:latest", "port": 80},
+    "gotify": {"label": "Gotify", "about": "Self-hosted push notification server with an app",
+               "image": "gotify/server:latest", "port": 80, "data": "/app/data"},
+    "webhook-tester": {"label": "Webhook Tester", "about": "A URL that shows every request sent to it",
+                       "image": "tarampampam/webhook-tester:2", "port": 8080, "data": "/data"},
+    "json-server": {"label": "JSON Server", "about": "A fake REST API from a db.json file in minutes",
+                    "image": "clue/json-server:latest", "port": 80, "data": "/data"},
+    "pairdrop": {"label": "PairDrop", "about": "Send files between phones and laptops on one network",
+                 "image": "lscr.io/linuxserver/pairdrop:latest", "port": 3000},
+    "syncthing": {"label": "Syncthing", "about": "Keep folders in sync across the team's machines",
+                  "image": "syncthing/syncthing:latest", "port": 8384, "data": "/var/syncthing"},
+    "nginx": {"label": "nginx", "about": "A static web server for a folder of HTML",
+              "image": "nginx:alpine", "port": 80, "data": "/usr/share/nginx/html"},
+    "caddy": {"label": "Caddy", "about": "A web server with a friendly config file",
+              "image": "caddy:2", "port": 80, "data": "/data"},
+    "cyberchef": {"label": "CyberChef", "about": "The cyber Swiss Army knife: encode, decode, hash, analyse",
+                  "image": "mpepping/cyberchef:latest", "port": 8000},
+    "trilium": {"label": "Trilium Notes", "about": "A hierarchical note-taking app for research",
+                "image": "triliumnext/trilium:latest", "port": 8080, "data": "/home/node/trilium-data"},
+    "vikunja": {"label": "Vikunja", "about": "Tasks, lists and kanban for the team",
+                "image": "vikunja/vikunja:latest", "port": 3456, "data": "/app/vikunja/files"},
+    "kanboard": {"label": "Kanboard", "about": "A simple kanban board",
+                 "image": "kanboard/kanboard:latest", "port": 80, "data": "/var/www/app/data"},
+    "openspeedtest": {"label": "OpenSpeedTest", "about": "Measure the venue Wi-Fi speed from a phone",
+                      "image": "openspeedtest/latest:latest", "port": 3000},
     "open-webui": {"label": "Open WebUI", "about": "ChatGPT-style chat for the Ollama models on this machine",
                    "image": "ghcr.io/open-webui/open-webui:main", "port": 8080, "data": "/app/backend/data",
                    "env": {"OLLAMA_BASE_URL": "http://host.docker.internal:11434"}, "host_gateway": True},
 }
+
+
+# --- templates you add yourself -----------------------------------------------------
+#
+# `hoist template add <compose file or URL>` stores any Compose file as a template.
+# Each lives in ~/.config/hoist/templates.d/<id>.json (the label and description)
+# next to <id>.yml (the file itself), so the catalogue is open-ended.
+
+USER_TEMPLATE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+MAX_COMPOSE_BYTES = 256 * 1024
+
+
+def user_template_dir() -> Path:
+    from . import config
+    return config.STATE_DIR / "templates.d"
+
+
+def catalogue() -> dict[str, dict]:
+    """Built-in templates plus the ones added with `hoist template add`."""
+    import json
+    merged = dict(TEMPLATES)
+    folder = user_template_dir()
+    if folder.is_dir():
+        for meta in sorted(folder.glob("*.json")):
+            try:
+                data = json.loads(meta.read_text())
+                tid = meta.stem
+                if USER_TEMPLATE_ID.match(tid) and (folder / f"{tid}.yml").is_file():
+                    merged[tid] = {"label": str(data.get("label") or tid)[:60],
+                                   "about": str(data.get("about") or "Added by you")[:160],
+                                   "image": ", ".join(data.get("images") or ["your compose file"])[:120],
+                                   "user": True}
+            except (OSError, ValueError):
+                continue
+    return merged
+
+
+def compose_images(text: str) -> list[str]:
+    return sorted({m.group(1) for m in re.finditer(r"^\s*image:\s*[\"']?([^\s\"'#]+)", text, re.MULTILINE)})
+
+
+def add_user_template(tid: str, source: str, label: str | None, about: str | None) -> dict:
+    """Fetch (URL) or read (path) a Compose file and keep it as a template."""
+    import json
+    import os
+    import urllib.request
+    if not USER_TEMPLATE_ID.match(tid) or tid in TEMPLATES:
+        raise ContainerError("pick a new id: lowercase letters, digits and dashes (built-in ids are taken)")
+    if source.startswith(("http://", "https://")):
+        req = urllib.request.Request(source, headers={"User-Agent": "hoist"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read(MAX_COMPOSE_BYTES + 1)
+        except Exception as exc:  # noqa: BLE001
+            raise ContainerError(f"could not download it: {getattr(exc, 'reason', exc)}") from exc
+    else:
+        path = Path(source).expanduser()
+        if not path.is_file():
+            raise ContainerError(f"{source} is not a file or a URL")
+        raw = path.read_bytes()[:MAX_COMPOSE_BYTES + 1]
+    if len(raw) > MAX_COMPOSE_BYTES:
+        raise ContainerError("that file is over 256 KB; a Compose file should be much smaller")
+    text = raw.decode("utf-8", "replace")
+    if not re.search(r"^services:\s*$", text, re.MULTILINE):
+        raise ContainerError("that does not look like a Compose file (no `services:` section)")
+    images = compose_images(text)
+    folder = user_template_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    fd = os.open(folder / f"{tid}.yml", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    (folder / f"{tid}.json").write_text(json.dumps(
+        {"label": label or tid, "about": about or "Added by you", "images": images}, indent=2) + "\n")
+    return {"id": tid, "images": images}
+
+
+def remove_user_template(tid: str) -> bool:
+    folder = user_template_dir()
+    found = False
+    for suffix in (".json", ".yml"):
+        path = folder / f"{tid}{suffix}"
+        if path.is_file():
+            path.unlink()
+            found = True
+    return found
 
 
 def template_secrets(template_id: str) -> dict[str, str]:
@@ -484,6 +649,9 @@ def template_secrets(template_id: str) -> dict[str, str]:
 
 def template_compose(template_id: str, values: dict[str, str] | None = None) -> str:
     """A compose file for a template: one service, its port on ${PORT}, a named volume."""
+    user_file = user_template_dir() / f"{template_id}.yml"
+    if template_id not in TEMPLATES and user_file.is_file():
+        return user_file.read_text()  # your own compose file runs exactly as written
     spec = TEMPLATES[template_id]
     values = values or template_secrets(template_id)
 

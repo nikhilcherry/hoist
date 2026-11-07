@@ -211,14 +211,38 @@ def cmd_up(args: argparse.Namespace) -> int:
             raise UserError(f"not a directory: {target}")
         name = detect.slug(args.name or target.name)
 
+    wants_buildpack = getattr(args, "buildpack", None)
     if args.cmd:
         command, how = args.cmd, "custom command"
+    elif wants_buildpack:
+        command, how = detect.BUILDPACK, "buildpack"
     else:
-        command, how = detect.detect_command(target)
+        try:
+            command, how = detect.detect_command(target)
+        except detect.DetectionError as exc:
+            # Nothing hoist knows how to run directly: a buildpack can still
+            # containerise it, if the user already has one installed.
+            if not containers.buildpack_tool():
+                raise detect.DetectionError(
+                    f"{exc}. For other languages, hoist can use a Dockerfile, or Nixpacks / pack if you "
+                    "install one (hoist never installs build tools itself)") from exc
+            command, how = detect.BUILDPACK, "buildpack"
 
     kind = None
     compose_path = None
     generated = False
+    buildpack = None
+    if command == detect.BUILDPACK:
+        buildpack = containers.buildpack_tool(None if wants_buildpack in (None, "auto") else wants_buildpack)
+        if buildpack is None:
+            raise UserError("no buildpack tool found. Install Nixpacks (nixpacks.com) or pack "
+                            "(buildpacks.io) yourself — hoist never installs build tools — or add a Dockerfile")
+        if not containers.available():
+            raise UserError("buildpacks build Docker images, and hoist needs a running Docker for it")
+        compose_path = containers.ensure_buildpack_compose(target, name)
+        generated = True
+        how = f"{buildpack} buildpack (port {containers.BUILDPACK_INNER_PORT} inside)"
+        command = detect.COMPOSE
     if command == detect.DOCKERFILE:
         if not containers.available():
             raise UserError("this project has a Dockerfile, and hoist needs a running Docker for it")
@@ -243,7 +267,9 @@ def cmd_up(args: argparse.Namespace) -> int:
 
     if repo is not None:
         build = getattr(args, "build", None)
-        if kind == "compose" and not build:
+        if buildpack:
+            steps = [build or containers.buildpack_build_step(buildpack, name)]
+        elif kind == "compose" and not build:
             steps = [containers.compose_build_step(name, generated)]
         else:
             steps = [build] if build else source.detect_build(target, command)
@@ -305,11 +331,20 @@ def cmd_up(args: argparse.Namespace) -> int:
         "created": (existing or {}).get("created") or config.now(),
         "updated": config.now(),
     }
+    if buildpack and repo is None:
+        # A local folder has no deploy step to build in, so build the image now.
+        step = getattr(args, "build", None) or containers.buildpack_build_step(buildpack, name)
+        ok, detail = source.run_build(target, [step], log=ui.step)
+        if not ok:
+            raise UserError(f"build failed: {detail}")
+        ui.ok("built")
     if repo is not None:
         app["repo"] = repo
     if kind == "compose":
         app["kind"] = "compose"
-    if generated:
+    if generated and buildpack:
+        app["buildpack"] = buildpack
+    elif generated:
         app["dockerfile"] = True
     if getattr(args, "preview_of", None):
         app["preview_of"] = args.preview_of
@@ -543,6 +578,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
             return 0
         if app.get("dockerfile"):
             containers.ensure_dockerfile_compose(release)
+        elif app.get("buildpack"):
+            containers.ensure_buildpack_compose(release, args.name)
         ok, detail = source.run_build(release, repo.get("build", []), transcript=transcript)
 
     entry = {"sha": wanted, "commit": commit, "at": config.now(), "trigger": trigger,
@@ -1001,17 +1038,36 @@ def cmd_exec(args: argparse.Namespace) -> int:
 
 
 def cmd_template(args: argparse.Namespace) -> int:
-    if args.id in (None, "list"):
-        ui.table([[k, v["label"], v["about"]] for k, v in containers.TEMPLATES.items()],
-                 ["ID", "APP", "WHAT IT IS"])
+    if args.id == "add":
+        if not args.source or not args.name:
+            raise UserError("usage: hoist template add <compose file or URL> --name <id> [--label L] [--about A]")
+        try:
+            info = containers.add_user_template(args.name, args.source, args.label, args.about)
+        except containers.ContainerError as exc:
+            raise UserError(str(exc)) from exc
+        ui.ok(f"saved as template {info['id']}; it will run these images: {', '.join(info['images']) or 'none found'}")
+        ui.step("a Compose file runs whatever its images do — read it before you deploy")
+        ui.step(f"deploy it with: hoist template {info['id']}")
         return 0
-    if args.id not in containers.TEMPLATES:
+    if args.id == "remove":
+        if not args.source or not containers.remove_user_template(args.source):
+            raise UserError("no such template of yours — see: hoist template list")
+        ui.ok(f"template {args.source} removed (apps already deployed from it keep running)")
+        return 0
+    catalogue = containers.catalogue()
+    if args.id in (None, "list"):
+        ui.table([[k, v["label"] + (" ★" if v.get("user") else ""), v["about"]] for k, v in catalogue.items()],
+                 ["ID", "APP", "WHAT IT IS"])
+        if any(v.get("user") for v in catalogue.values()):
+            ui.step("★ = a template you added")
+        return 0
+    if args.id not in catalogue:
         raise UserError(f"no template {args.id!r} — see: hoist template list")
     try:
         containers.docker()
     except containers.ContainerError as exc:
         raise UserError(str(exc)) from exc
-    spec = containers.TEMPLATES[args.id]
+    spec = catalogue[args.id]
     name = detect.slug(args.name or args.id)
     if config.get_app(config.load(), name):
         raise UserError(f"{name} already exists — pick another --name")
@@ -1239,7 +1295,9 @@ def cmd_dash(args: argparse.Namespace) -> int:
     base = (config.load().get("dash_url") or f"http://127.0.0.1:{port}").rstrip("/")
     if args.add_user:
         try:
-            member = team.add(args.add_user, args.role)
+            member = team.add(args.add_user, args.role,
+                              [c for c in (args.can or "").split(",") if c],
+                              [a for a in (args.apps or "").split(",") if a])
         except team.TeamError as exc:
             raise UserError(str(exc)) from exc
         team.audit("owner", "add teammate", args.add_user.lower(), "from the CLI")
@@ -1254,8 +1312,12 @@ def cmd_dash(args: argparse.Namespace) -> int:
         return 0
     if args.users:
         people = team.users()
-        ui.table([["owner", "owner", "—"]] + [[n, i.get("role", "member"), i.get("added", "")] for n, i in sorted(people.items())],
-                 ["NAME", "ROLE", "ADDED"])
+        def summary(i: dict) -> str:
+            if i.get("role") != "custom":
+                return i.get("role", "member")
+            return f"custom: {','.join(i.get('can', [])) or 'view'} on {','.join(i.get('apps', [])) or 'all apps'}"
+        ui.table([["owner", "owner", "—"]] + [[n, summary(i), i.get("added", "")] for n, i in sorted(people.items())],
+                 ["NAME", "ACCESS", "ADDED"])
         return 0
 
     if args.service or args.public:
@@ -1336,6 +1398,8 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--local", action="store_true", help="LAN URL only, no tunnel")
     up.add_argument("--branch", help="git branch to deploy (repo URLs only)")
     up.add_argument("--build", help="build command for a repo, overriding detection")
+    up.add_argument("--buildpack", nargs="?", const="auto", choices=["auto", "nixpacks", "pack"],
+                    help="build with a buildpack you already have installed (any language)")
     up.add_argument("--preview-of", help=argparse.SUPPRESS)
     up.add_argument("--no-sync", action="store_true",
                     help="deploy a repo once, without redeploying on push")
@@ -1423,8 +1487,11 @@ def build_parser() -> argparse.ArgumentParser:
     ex.set_defaults(func=cmd_exec)
 
     tpl = sub.add_parser("template", help="one-click apps: uptime-kuma, n8n, ntfy, excalidraw...")
-    tpl.add_argument("id", nargs="?", help="template id, or `list`")
-    tpl.add_argument("--name", help="app name (default: the template id)")
+    tpl.add_argument("id", nargs="?", help="template id, `list`, `add` or `remove`")
+    tpl.add_argument("source", nargs="?", help="with add: a Compose file or URL; with remove: the template id")
+    tpl.add_argument("--name", help="app name (default: the template id); with add: the new template's id")
+    tpl.add_argument("--label", help="with add: a display name")
+    tpl.add_argument("--about", help="with add: a one-line description")
     tpl.add_argument("--local", action="store_true", help="LAN URL only, no tunnel")
     tpl.add_argument("--domain")
     add_qr_flags(tpl)
@@ -1477,8 +1544,11 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--stop", action="store_true", help="stop and remove the dashboard service")
     dash.add_argument("--reset-token", action="store_true", help="sign every browser out")
     dash.add_argument("--add-user", metavar="NAME", help="give a teammate their own sign-in link")
-    dash.add_argument("--role", default="member", choices=["member", "viewer"],
-                      help="with --add-user: member (deploy and operate) or viewer (read only)")
+    dash.add_argument("--role", default="member", choices=["member", "viewer", "custom"],
+                      help="with --add-user: member (everything but people), viewer (read only) or custom")
+    dash.add_argument("--can", metavar="LIST",
+                      help="with --role custom: comma list of deploy,operate,config,backups,delete,secrets")
+    dash.add_argument("--apps", metavar="LIST", help="with --role custom: only these apps (default: all)")
     dash.add_argument("--remove-user", metavar="NAME", help="revoke a teammate's link")
     dash.add_argument("--users", action="store_true", help="list who has access")
     dash.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)

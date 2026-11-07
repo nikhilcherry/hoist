@@ -103,7 +103,10 @@ function newAppDrawer() {
   const box = openLayer(`<div class="drawer" aria-labelledby="na-title"><div class="drawer-head"><h2 id="na-title" style="flex:1">New app</h2><button class="btn ghost icon" data-x aria-label="Close">${ic("x")}</button></div>
     <form class="drawer-body" id="na-form" autocomplete="off">
       <div class="seg" role="group" aria-label="Where the code comes from"><button type="button" data-mode="git" aria-pressed="true">${ic("git", 14, 'style="vertical-align:-2px"')} Git repository</button><button type="button" data-mode="folder" aria-pressed="false">${ic("folder", 14, 'style="vertical-align:-2px"')} Folder on ${esc(s.host || "this machine")}</button><button type="button" data-mode="template" aria-pressed="false">${ic("box", 14, 'style="vertical-align:-2px"')} Ready-made app</button></div>
-      <div id="na-templates" class="hidden" role="radiogroup" aria-label="Ready-made apps" style="display:flex;flex-direction:column;gap:6px"></div>
+      <div id="na-tplwrap" class="hidden" style="display:flex;flex-direction:column;gap:8px">
+        <input class="input" id="na-tplq" placeholder="Search ready-made apps" aria-label="Search ready-made apps" autocomplete="off">
+        <div id="na-templates" role="radiogroup" aria-label="Ready-made apps" style="display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto;padding-right:4px"></div>
+        <span class="hint muted" id="na-tplhint"></span></div>
       <div class="field"><label for="na-target" id="na-target-label">Repository</label><input class="input mono" id="na-target" placeholder="github.com/team/project" required autofocus spellcheck="false">
         <span class="hint" id="na-target-hint">Public or private: hoist uses this machine's git credentials. Every push to the branch redeploys.</span></div>
       <div class="row-2">
@@ -136,15 +139,24 @@ function newAppDrawer() {
   nameIn.addEventListener("input", () => { nameTouched = true; updUrl(); });
   let tpl = null;
   const tplBox = $("#na-templates", box);
-  api("/api/templates").then((r) => {
-    tplBox.innerHTML = r.templates.map((x) => `<label class="tpl"><input type="radio" name="tpl" value="${x.id}"><span><strong>${esc(x.label)}</strong><span class="muted"> — ${esc(x.about)}</span><br><span class="faint mono" style="font-size:12px">${esc(x.image)}</span></span></label>`).join("") +
-      (r.docker ? "" : `<div class="notice bad">Docker is not running on this machine, so ready-made apps cannot start.</div>`);
+  let allTemplates = [];
+  const paintTemplates = () => {
+    const q = $("#na-tplq", box).value.trim().toLowerCase();
+    const shown = allTemplates.filter((x) => !q || `${x.id} ${x.label} ${x.about} ${x.image}`.toLowerCase().includes(q));
+    tplBox.innerHTML = shown.map((x) => `<label class="tpl"><input type="radio" name="tpl" value="${x.id}" ${x.id === tpl ? "checked" : ""}><span><strong>${esc(x.label)}</strong>${x.user ? ' <span class="pill">yours</span>' : ""}<span class="muted"> — ${esc(x.about)}</span><br><span class="faint mono" style="font-size:12px">${esc(x.image)}</span></span></label>`).join("") ||
+      `<div class="muted" style="padding:10px">No ready-made app matches “${esc(q)}”.</div>`;
     $$("input[name=tpl]", tplBox).forEach((i) => i.addEventListener("change", () => { tpl = i.value; if (!nameTouched) { nameIn.value = tpl; updUrl(); } }));
+    $("#na-tplhint", box).textContent = `${shown.length} of ${allTemplates.length} · add any Compose file as your own with: hoist template add <file or URL> --name <id>`;
+  };
+  $("#na-tplq", box).addEventListener("input", paintTemplates);
+  api("/api/templates").then((r) => {
+    allTemplates = r.templates; paintTemplates();
+    if (!r.docker) tplBox.insertAdjacentHTML("beforebegin", `<div class="notice bad">Docker is not running on this machine, so ready-made apps cannot start.</div>`);
   }).catch(() => {});
   $$("[data-mode]", box).forEach((b) => b.addEventListener("click", () => {
     mode = b.dataset.mode; $$("[data-mode]", box).forEach((x) => x.setAttribute("aria-pressed", x === b));
     const isTpl = mode === "template";
-    tplBox.classList.toggle("hidden", !isTpl);
+    $("#na-tplwrap", box).classList.toggle("hidden", !isTpl);
     target.closest(".field").classList.toggle("hidden", isTpl); target.required = !isTpl;
     $("details", box).classList.toggle("hidden", isTpl);
     $("#na-env", box).closest(".field").classList.toggle("hidden", isTpl);
@@ -362,6 +374,7 @@ async function doAction(action, name, el) {
       toast(on ? `Every branch of ${name} now gets a preview` : `Branch previews off for ${name}`);
       return poll();
     }
+    if (action === "edit-access") return editAccess(el.dataset.user);
     if (action === "remove-user") {
       const who = el.dataset.user;
       const ok = await confirmDialog({ title: `Remove ${who}?`, body: `${esc(who)}'s link stops working at once. Their entries stay in the audit log.`, ok: "Remove", danger: true });

@@ -146,10 +146,9 @@ def make_handler(dash: Dashboard):
             self._json({"error": message}, code)
 
         def _body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > 1_000_000:
+            raw = getattr(self, "_raw", b"")
+            if len(raw) > 1_000_000:
                 raise ValueError("request too large")
-            raw = self.rfile.read(length) if length else b""
             if not raw:
                 return {}
             data = json.loads(raw)
@@ -242,6 +241,14 @@ def make_handler(dash: Dashboard):
         def do_POST(self):  # noqa: N802
             url = urllib.parse.urlsplit(self.path)
             path = url.path
+            # Read the body before anything can answer early. On a keep-alive
+            # connection an unread body is parsed as the start of the NEXT
+            # request, so a rejected click used to corrupt the one after it.
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 5_000_000:
+                self.close_connection = True
+                return self._error(413, "request too large")
+            self._raw = self.rfile.read(length) if length else b""
             match = re.fullmatch(r"/hooks/([a-z0-9-]+)", path)
             if match:
                 return self._webhook(match.group(1))
@@ -265,8 +272,9 @@ def make_handler(dash: Dashboard):
             remote = re.fullmatch(r"/api/remote/([a-z0-9-]+)/(.+)", path)
             if remote:
                 return self._proxy("POST", remote.group(1), remote.group(2), url.query)
-            if team.role_of(self.user) == "viewer":
-                return self._error(403, "viewers can look but not change anything")
+            need = _required(path)
+            if need is not None and not team.allows(self.user, *need):
+                return self._error(403, _denied(self.user, *need))
             try:
                 body = self._body()
             except (ValueError, json.JSONDecodeError) as exc:
@@ -281,18 +289,27 @@ def make_handler(dash: Dashboard):
         def _api_get(self, path: str, query: dict) -> None:
             if path == "/api/state":
                 snap = dash.monitor.get()
-                if team.role_of(self.user) == "viewer":
-                    snap = redact_state(snap)
-                snap["jobs"] = dash.jobs.recent()[:12]
+                seen = team.scope(self.user)
+                if seen is not None:
+                    snap = dict(snap, apps=[a for a in snap.get("apps", []) if a["name"] in seen])
+                snap = redact_state(snap, lambda n: team.allows(self.user, "secrets", n))
+                snap["jobs"] = [j for j in dash.jobs.recent()[:40]
+                                if seen is None or j.get("app") in seen][:12]
                 snap["version"] = VERSION
                 snap["me"] = self.user
                 snap["role"] = team.role_of(self.user)
+                access = team.access(self.user) or {}
+                snap["can"] = sorted(access.get("caps", ()))
+                snap["scope"] = sorted(seen) if seen is not None else None
                 return self._json(snap)
 
             if path == "/api/deployments":
                 state = config.load()
                 rows = []
+                seen = team.scope(self.user)
                 for name, app in state.get("apps", {}).items():
+                    if seen is not None and name not in seen:
+                        continue
                     repo = app.get("repo") or {}
                     for entry in repo.get("history", []):
                         rows.append(dict(entry, app=name, live=entry.get("sha") == repo.get("sha")
@@ -303,13 +320,14 @@ def make_handler(dash: Dashboard):
 
             if path == "/api/notify":
                 url = (config.load().get("notify") or {}).get("url")
-                if url and team.role_of(self.user) == "viewer":
+                if url and not team.allows(self.user, "secrets"):
                     url = _URL_SECRET.sub(r"\1••••••@", url)
                 return self._json({"url": url, "kind": notify.kind(url) if url else None})
 
             if path == "/api/templates":
                 return self._json({"templates": [{"id": k, "label": v["label"], "about": v["about"],
-                                                  "image": v["image"]} for k, v in containers.TEMPLATES.items()],
+                                                  "image": v["image"], "user": bool(v.get("user"))}
+                                                 for k, v in containers.catalogue().items()],
                                    "docker": containers.available()})
 
             if path == "/api/team":
@@ -317,9 +335,15 @@ def make_handler(dash: Dashboard):
                            "seen": dash.seen.get(team.OWNER)}]
                 for name, info in sorted(team.users().items()):
                     people.append({"name": name, "role": info.get("role", "member"), "added": info.get("added"),
-                                   "seen": dash.seen.get(name)})
-                return self._json({"me": self.user, "people": people,
-                                   "audit": team.audit_tail(int((query.get("n") or ["200"])[0]))})
+                                   "seen": dash.seen.get(name), "can": info.get("can", []),
+                                   "apps": info.get("apps", [])})
+                seen = team.scope(self.user)
+                audit = team.audit_tail(int((query.get("n") or ["200"])[0]))
+                if seen is not None:  # a scoped person sees only their own apps' history
+                    audit = [r for r in audit if r.get("target") in seen]
+                    people = [p for p in people if p["name"] == self.user]
+                return self._json({"me": self.user, "people": people, "audit": audit,
+                                   "caps": team.CAPS})
 
             if path == "/api/metrics":
                 return self._json({"system": dash.monitor.series()})
@@ -337,7 +361,10 @@ def make_handler(dash: Dashboard):
             if path == "/api/routes":
                 rules = dash.monitor.get().get("routes", {}).get("rules", [])
                 data = []
+                seen = team.scope(self.user)
                 for rule in rules:
+                    if seen is not None and rule.get("managed") not in seen:
+                        continue
                     key = (f"route:{rule['hostname']}" if not rule.get("managed")
                            else rule.get("managed"))
                     data.append(dict(rule, probes=dash.monitor.probes_for(key or "")))
@@ -348,7 +375,9 @@ def make_handler(dash: Dashboard):
                 job = dash.jobs.get(match.group(1))
                 if job is None:
                     return self._error(404, "no such job")
-                if team.role_of(self.user) == "viewer":
+                if job.app is not None and not team.allows(self.user, "view", job.app):
+                    return self._error(404, "no such job")
+                if not team.allows(self.user, "secrets", job.app):
                     data = job.as_dict(with_lines=True)
                     data["lines"] = [re.sub(r"(password[^:]*:\s*)\S+", r"\1••••••", ln, flags=re.I)
                                      for ln in data["lines"]]
@@ -360,9 +389,11 @@ def make_handler(dash: Dashboard):
             match = re.fullmatch(r"/api/apps/([a-z0-9-]+)(/[a-z/]+(?:/[0-9]{8}-[0-9]{6}\.[a-z.]+)?)?", path)
             if match:
                 name, rest = match.group(1), match.group(2) or ""
+                if not team.allows(self.user, "view", name):
+                    return self._error(404, "no such app")
                 if rest == "":
                     detail = dash.app_detail(name)
-                    if detail and team.role_of(self.user) == "viewer":
+                    if detail and not team.allows(self.user, "secrets", name):
                         detail = redact(detail)
                     return self._json(detail) if detail else self._error(404, "no such app")
                 app = dash.app(name)
@@ -378,8 +409,8 @@ def make_handler(dash: Dashboard):
                                        "daily": bool(holder.get("daily_backup")),
                                        "offsite": holder.get("offsite")})
                 match_dl = re.fullmatch(r"/backups/([0-9]{8}-[0-9]{6}\.[a-z.]+)", rest)
-                if match_dl and team.role_of(self.user) == "viewer":
-                    return self._error(403, "viewers cannot download backups")
+                if match_dl and not team.allows(self.user, "secrets", name):
+                    return self._error(403, "downloading a backup needs the 'secrets' permission")
                 if match_dl and app.get("kind") in ("db", "compose"):
                     path = containers.backup_dir(name) / match_dl.group(1)
                     if not path.is_file():
@@ -411,8 +442,7 @@ def make_handler(dash: Dashboard):
                 return self._error(501, "open the terminal on that machine's own dashboard")
             body = None
             if method == "POST":
-                length = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(length) if length else b"{}"
+                body = self._raw or b"{}"
                 self._audit("remote " + rest.rsplit("/", 1)[-1], f"{sid}:{rest}")
             stream = rest.endswith("/stream")
             try:
@@ -530,10 +560,7 @@ def make_handler(dash: Dashboard):
             signed with the app's own secret (GitHub's X-Hub-Signature-256,
             or GitLab's X-Gitlab-Token), compared in constant time.
             """
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > 5_000_000:
-                return self._error(413, "payload too large")
-            raw = self.rfile.read(length) if length else b""
+            raw = self._raw
             app = dash.app(name)
             secret = ((app or {}).get("repo") or {}).get("webhook_secret")
             if not secret:
@@ -570,7 +597,8 @@ def make_handler(dash: Dashboard):
                 return self._create(body)
             if path == "/api/templates":
                 tid = str(body.get("id", ""))
-                if tid not in containers.TEMPLATES:
+                catalogue = containers.catalogue()
+                if tid not in catalogue:
                     raise ValueError("pick a template")
                 name = str(body.get("name", "") or tid).strip().lower()
                 if not _NAME.match(name):
@@ -579,7 +607,7 @@ def make_handler(dash: Dashboard):
                     raise ValueError(f"{name} already exists")
                 args = ["template", tid, "--name", name, "--no-qr"] + (["--local"] if body.get("local") else [])
                 self._audit("create from template", name, tid)
-                job = dash.jobs.start(f"Start {containers.TEMPLATES[tid]['label']} as {name}", args, name, self.user)
+                job = dash.jobs.start(f"Start {catalogue[tid]['label']} as {name}", args, name, self.user)
                 return self._json({"job": job.as_dict(), "app": name}, 202)
             if path == "/api/servers":
                 if self.user != team.OWNER:
@@ -616,8 +644,11 @@ def make_handler(dash: Dashboard):
                     return self._error(403, "only the owner can add people")
                 name = str(body.get("name", ""))
                 role = str(body.get("role", "member"))
-                token = team.add(name, role)
-                self._audit("add teammate", name.strip().lower(), role)
+                can, apps = body.get("can") or [], body.get("apps") or []
+                if not isinstance(can, list) or not isinstance(apps, list):
+                    raise ValueError("can and apps must be lists")
+                token = team.add(name, role, [str(c) for c in can], [str(a) for a in apps])
+                self._audit("add teammate", name.strip().lower(), _describe(role, can, apps))
                 base = str(body.get("origin") or "").rstrip("/")
                 if not re.match(r"^https?://[^/\s]+$", base):
                     base = ""
@@ -626,8 +657,12 @@ def make_handler(dash: Dashboard):
             if match:
                 if self.user != team.OWNER:
                     return self._error(403, "only the owner can change roles")
-                team.set_role(match.group(1), str(body.get("role", "")))
-                self._audit("change role", match.group(1), str(body.get("role", "")))
+                role = str(body.get("role", ""))
+                can, apps = body.get("can") or [], body.get("apps") or []
+                if not isinstance(can, list) or not isinstance(apps, list):
+                    raise ValueError("can and apps must be lists")
+                team.set_role(match.group(1), role, [str(c) for c in can], [str(a) for a in apps])
+                self._audit("change access", match.group(1), _describe(role, can, apps))
                 return self._json({"ok": True})
             match = re.fullmatch(r"/api/team/([a-z][a-z0-9_-]{0,23})/remove", path)
             if match:
@@ -860,8 +895,42 @@ def _redact_row(row: dict) -> dict:
     return row
 
 
-def redact_state(snap: dict) -> dict:
-    return dict(snap, apps=[_redact_row(r) for r in snap.get("apps", [])])
+def redact_state(snap: dict, keep=lambda name: False) -> dict:
+    """Hide database passwords from anyone who lacks the 'secrets' permission on that app."""
+    return dict(snap, apps=[r if keep(r["name"]) else _redact_row(r) for r in snap.get("apps", [])])
+
+
+def _required(path: str):
+    """(capability, app) a write to `path` needs, or None when the handler checks for itself."""
+    if path in ("/api/apps", "/api/templates", "/api/databases"):
+        return ("deploy", None)
+    if path in ("/api/notify", "/api/notify/test"):
+        return ("config", None)
+    match = re.fullmatch(r"/api/apps/([a-z0-9-]+)/([a-z-]+)", path)
+    if match:
+        name, action = match.groups()
+        cap = team.ACTION_CAP.get(action)
+        if cap is None:  # exec and anything else unlisted: the owner only
+            return ("owner-only", name)
+        return (cap, name)
+    return None
+
+
+def _describe(role: str, can: list, apps: list) -> str:
+    if role != "custom":
+        return role
+    return f"custom: {', '.join(sorted(map(str, can))) or 'view only'}" + (
+        f" on {', '.join(sorted(map(str, apps)))}" if apps else " on all apps")
+
+
+def _denied(user: str | None, cap: str, app: str | None) -> str:
+    access = team.access(user) or {}
+    if cap == "owner-only":
+        return "only the owner can do that"
+    if cap not in access.get("caps", ()):
+        what = team.CAPS.get(cap, cap)
+        return f"your access does not include this ({what.lower()})"
+    return f"your access is limited to some apps, and {app or 'this action'} is not one of them"
 
 
 def qr_svg(text: str) -> str:

@@ -23,7 +23,8 @@ class _StubMonitor:
         pass
 
     def get(self):
-        return {"apps": [], "system": {}, "routes": {"rules": []}}
+        apps = [{"name": n, "kind": "app"} for n in config.load().get("apps", {})]
+        return {"apps": apps, "system": {}, "routes": {"rules": []}}
 
     def series(self, name=None):
         return []
@@ -292,3 +293,96 @@ def test_a_linked_machine_is_managed_through_the_proxy(dash, monkeypatch, tmp_pa
         assert b"other-token" not in call(port, "GET", "/api/servers", headers=auth(token))[2]
     finally:
         other.shutdown()
+
+
+# --- granular permissions ---------------------------------------------------------
+
+
+@pytest.fixture
+def two_apps(dash):
+    with config.transaction() as st:
+        st["apps"]["api"] = {"name": "api", "port": 8, "workdir": "/tmp", "cmd": "true",
+                             "env": {"SECRET": "s-api"}, "repo": {"url": "u", "branch": "main"}}
+        st["apps"]["web"]["env"] = {"SECRET": "s-web"}
+    return dash
+
+
+def _w(token):
+    return {**auth(token), "X-Hoist": "1"}
+
+
+def test_a_scoped_person_sees_and_touches_only_their_apps(two_apps):
+    from hoist.dash import team
+    port, _ = two_apps
+    tok = team.add("judge", "custom", ["operate", "deploy"], ["api"])
+    state = json.loads(call(port, "GET", "/api/state", headers=auth(tok))[2])
+    assert [a["name"] for a in state["apps"]] == ["api"] and state["scope"] == ["api"]
+    assert call(port, "GET", "/api/apps/web", headers=auth(tok))[0] == 404
+    assert call(port, "GET", "/api/apps/api", headers=auth(tok))[0] == 200
+    assert call(port, "POST", "/api/apps/web/restart", {}, headers=_w(tok))[0] == 403
+    status, _, body = call(port, "POST", "/api/apps/api/restart", {}, headers=_w(tok))
+    assert status != 403  # allowed; the restart itself may fail in the sandbox
+    # creating an app is machine-wide, so a scoped person cannot
+    assert call(port, "POST", "/api/apps", {"target": "github.com/a/b"}, headers=_w(tok))[0] == 403
+
+
+def test_capabilities_are_granted_one_by_one(two_apps):
+    from hoist.dash import team
+    port, _ = two_apps
+    tok = team.add("ops", "custom", ["operate"], [])
+    assert call(port, "POST", "/api/apps/web/restart", {}, headers=_w(tok))[0] != 403
+    for action, body in (("env", {"env": {}}), ("redeploy", {}), ("delete", {}), ("limits", {})):
+        status, _, text = call(port, "POST", f"/api/apps/web/{action}", body, headers=_w(tok))
+        assert status == 403, action
+    assert b"environment variables" in text or b"your access" in text
+
+
+def test_secrets_are_a_permission_not_a_role(two_apps):
+    from hoist.dash import team
+    port, _ = two_apps
+    blind = team.add("blind", "custom", ["operate"], [])
+    sighted = team.add("sighted", "custom", ["operate", "secrets"], [])
+    assert b"s-web" not in call(port, "GET", "/api/apps/web", headers=auth(blind))[2]
+    assert b"s-web" in call(port, "GET", "/api/apps/web", headers=auth(sighted))[2]
+
+
+def test_the_audit_log_is_limited_to_a_scoped_persons_apps(two_apps):
+    from hoist.dash import team
+    port, token = two_apps
+    team.audit("owner", "restart", "web")
+    team.audit("owner", "restart", "api")
+    tok = team.add("judge", "custom", [], ["api"])
+    rows = json.loads(call(port, "GET", "/api/team", headers=auth(tok))[2])["audit"]
+    assert {r["target"] for r in rows} == {"api"}
+
+
+def test_only_the_owner_runs_commands_and_changes_access(two_apps):
+    from hoist.dash import team
+    port, _ = two_apps
+    tok = team.add("god", "custom", list(team.CAPS), [])
+    assert call(port, "POST", "/api/apps/web/exec", {"command": "id"}, headers=_w(tok))[0] == 403
+    assert call(port, "POST", "/api/team", {"name": "x"}, headers=_w(tok))[0] == 403
+
+
+def test_unknown_permissions_are_refused(two_apps):
+    from hoist.dash import team
+    with pytest.raises(team.TeamError):
+        team.add("x", "custom", ["sudo"], [])
+
+
+def test_a_rejected_post_does_not_corrupt_the_next_request_on_the_same_connection(two_apps):
+    """The bug this pins: an early 403 left the request body unread, so on a
+    keep-alive connection it was parsed as the next request's first line and
+    the next (allowed) click came back as '501 Unsupported method'."""
+    from hoist.dash import team
+    port, _ = two_apps
+    tok = team.add("ops", "custom", ["operate"], ["api"])
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    headers = {**auth(tok), "X-Hoist": "1", "Content-Type": "application/json"}
+    conn.request("POST", "/api/apps/web/restart", body=b'{"x": 1}', headers=headers)   # not in scope: 403
+    first = conn.getresponse(); first.read()
+    assert first.status == 403
+    conn.request("POST", "/api/apps/api/restart", body=b"{}", headers=headers)          # allowed
+    second = conn.getresponse(); second.read()
+    assert second.status not in (400, 501), second.status
+    conn.close()

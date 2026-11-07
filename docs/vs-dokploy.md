@@ -27,7 +27,7 @@ Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026
 | | hoist | Dokploy | Notes |
 | --- | :-: | :-: | --- |
 | Deploy on `git push` | ✓ | ✓ | hoist: a signed GitHub/GitLab webhook goes live in **0.27 s** (median of 5, below), with a 20 s poll as fallback that needs no inbound access |
-| Builds | ◐ | ✓ | hoist: npm/pnpm/yarn, Python venv, Procfile, Dockerfile, Compose. Dokploy adds Nixpacks and Heroku/Paketo buildpacks |
+| Builds | ◐ | ✓ | hoist: npm/pnpm/yarn, Python venv, Procfile, Dockerfile, Compose, and Nixpacks or `pack` **if you already have them installed** (hoist never installs build tools; exercised with a stand-in tool honouring the Nixpacks command line, not the real one). Dokploy bundles Nixpacks and Heroku/Paketo buildpacks |
 | Docker Compose stacks | ✓ | ✓ | hoist builds a stack before it goes live, so a broken Dockerfile never replaces the running one |
 | A failed build never takes the app down | ✓ | — | hoist builds each commit in its own release and swaps a symlink only on success; Dokploy documents automatic rollback on failed Swarm health checks |
 | Rollbacks | ✓ | ✓ | hoist: one click to any commit, instant when the release is still on disk; Dokploy: Swarm or registry-based |
@@ -36,7 +36,7 @@ Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026
 | Link a database to an app | ✓ | — | `hoist link db app` / one button writes `DATABASE_URL` (or `REDIS_URL`…) and restarts the app |
 | Database backups | ✓ | ✓ | hoist: daily, keep 10, restore, download, copy off-site to any rclone remote (S3, R2, B2, Drive) |
 | Volume backups (non-database) | ✓ | ✓ | hoist archives every volume of a Docker stack in one file, with its containers paused for consistency; restore and download |
-| One-click app templates | ◐ | ✓ | hoist ships 24 (Uptime Kuma, n8n, Gitea, code-server, MinIO, Grafana, Jupyter, Directus, Open WebUI…), with generated passwords; Dokploy's catalogue is larger |
+| One-click app templates | ◐ | ✓ | hoist ships 46 with generated passwords, and `hoist template add <Compose file or URL>` turns any Compose file into your own template, so the catalogue is open-ended. Dokploy's built-in catalogue is larger |
 | Environment variables | ✓ | ✓ | hoist: editor, paste a `.env`, values hidden by default, unit files `0600` |
 | Resource limits | ✓ | ✓ | hoist: memory and CPU; on containers they go to Docker, not to systemd |
 | Live logs | ✓ | ✓ | hoist: app output and the deploy log, search, follow, download |
@@ -44,8 +44,8 @@ Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026
 | CPU, memory, disk, network | ✓ | ✓ | hoist measures containers from their cgroups, not the docker client |
 | External uptime checks of each public URL | ✓ | — | every 30 s, with a one-hour strip and "why it is down" in plain words |
 | Notifications | ✓ | ✓ | hoist: Discord, Slack, Telegram, ntfy, email (SMTP) and any JSON webhook |
-| Team accounts and roles | ◐ | ✓ | hoist: owner, member (deploy and operate) and viewer (read only, secrets redacted), each with their own link; Dokploy documents finer-grained per-user permissions |
-| Audit log | ✓ | — | who deployed, rolled back, changed env (values never logged), ran a command |
+| Team accounts and roles | ✓ | ✓ | hoist: owner, member, viewer and **custom** roles built from six permissions (deploy, operate, config, backups, delete, secrets), limited to chosen apps, each person with their own link. Dokploy's free tier has fixed Owner/Admin/Member roles with per-project, per-service and per-environment access; its custom roles are an Enterprise feature |
+| Audit log | ✓ | ✓ | hoist: who deployed, rolled back, changed env (values never logged) or ran a command, free. In Dokploy audit logs are listed as an Enterprise feature |
 | QR code for every app | ✓ | — | for putting the demo on a judge's phone |
 | Several servers | ◐ | ✓ | hoist: link other machines' dashboards and manage them all from one (apps, deploys, logs, databases, backups), tokens kept server-side. Dokploy also scales one app across a Swarm cluster; hoist does not |
 | Command palette, light and dark | ✓ | — | |
@@ -67,9 +67,10 @@ exits non-zero (`test_a_broken_build_never_touches_the_files_being_served`).
 ## What Dokploy still does that hoist does not
 
 - Scale one app across a Docker Swarm cluster (hoist links separate machines; it does not schedule one app over them).
-- Nixpacks and Heroku/Paketo buildpacks. hoist detects npm/pnpm/yarn, Python, Procfile, Dockerfile and Compose, and does not install third-party build tooling.
-- A larger template catalogue (hoist ships 24).
-- Finer-grained per-user permissions than owner, member and viewer.
+- Ship Nixpacks and Heroku/Paketo buildpacks built in. hoist uses them only if you installed them.
+- A larger built-in template catalogue (hoist: 46, plus any Compose file you add).
+- Per-environment access (production vs staging), an Admin role, SSO (an Enterprise feature in Dokploy), and finer permission categories such as API/CLI and SSH-key access. hoist's permissions are the six listed above.
+- Interactive-terminal parity on remote machines: hoist opens the terminal on that machine's own dashboard.
 
 ## When to use which
 
@@ -80,6 +81,9 @@ exits non-zero (`test_a_broken_build_never_touches_the_files_being_served`).
 ## Sources
 
 - Dokploy features: <https://docs.dokploy.com/docs/core/features>
+- Dokploy permissions and roles: <https://docs.dokploy.com/docs/core/permissions>
+- Dokploy custom roles (Enterprise): <https://docs.dokploy.com/docs/core/enterprise/custom-roles>
+- Dokploy role-based access control: <https://dokploy.com/features/role-based-access-control>
 - Dokploy rollbacks: <https://docs.dokploy.com/docs/core/applications/rollbacks>
 - Dokploy v0.24.0 (rollbacks, volume backups): <https://dokploy.com/blog/v0-24-0-rollbacks-docker-volume-backups-more>
 - Dokploy vs CapRover (Dokploy's own comparison): <https://dokploy.com/dokploy-vs-caprover>

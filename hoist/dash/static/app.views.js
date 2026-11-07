@@ -904,6 +904,38 @@ VIEWS.databases = () => ({
   },
 });
 
+function accessSummary(p) {
+  const caps = (p.can || []).length ? p.can.join(", ") : "view only";
+  return `${esc(caps)} · ${(p.apps || []).length ? `only ${p.apps.map(esc).join(", ")}` : "all apps"}`;
+}
+function accessLabel(p) { return p.role === "viewer" ? "Viewer" : p.role === "custom" ? "Custom" : "Member"; }
+
+// The capability and app pickers, shared by "add a teammate" and "edit access".
+function accessPicker(caps, chosen = [], apps = [], prefix = "ac") {
+  const names = (store.state?.apps || []).map((a) => a.name);
+  const capRows = Object.entries(caps).map(([k, v]) => `<label class="tpl" style="padding:8px 10px"><input type="checkbox" data-cap="${k}" ${chosen.includes(k) ? "checked" : ""}><span><strong>${esc(k)}</strong><span class="muted"> — ${esc(v)}</span></span></label>`).join("");
+  const appRows = names.length ? names.map((n) => `<label class="tpl" style="padding:6px 10px"><input type="checkbox" data-appscope="${esc(n)}" ${apps.includes(n) ? "checked" : ""}><span class="mono" style="font-size:12.5px">${esc(n)}</span></label>`).join("") : '<span class="muted">No apps yet.</span>';
+  return `<div class="field" id="${prefix}-box"><label>What they can do</label>
+    <div style="display:flex;flex-direction:column;gap:6px">${capRows}</div>
+    <label style="margin-top:8px">Which apps <span class="muted" style="font-weight:400">(none ticked = all apps; apps created later are not included)</span></label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">${appRows}</div></div>`;
+}
+const readPicker = (root) => ({ can: $$("[data-cap]:checked", root).map((x) => x.dataset.cap), apps: $$("[data-appscope]:checked", root).map((x) => x.dataset.appscope) });
+
+function editAccess(who) {
+  const p = (store.team?.people || []).find((x) => x.name === who);
+  if (!p) return;
+  const box = openLayer(`<div class="dialog" style="width:min(560px,calc(100vw - 32px));top:8vh"><form class="body" id="access-form" style="max-height:74vh;overflow:auto"><h2>Access for ${esc(who)}</h2>
+    ${accessPicker(store.team.caps || {}, p.can || [], p.apps || [], "ed")}</form>
+    <div class="foot"><button class="btn" data-x>Cancel</button><button class="btn primary" form="access-form" type="submit">Save access</button></div></div>`);
+  $("[data-x]", box).onclick = () => { closeLayer(); poll(); };
+  $("#access-form", box).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await post(`/api/team/${who}/role`, { role: "custom", ...readPicker(box) }); toast(`Access for ${who} saved`); closeLayer(); poll(); }
+    catch (err) { toast(err.message, true); }
+  });
+}
+
 VIEWS.team = () => ({
   title: "Team",
   crumbs: [["Team", "/team"]],
@@ -914,7 +946,7 @@ VIEWS.team = () => ({
       const t = store.team; if (!t) return `<div class="card-body"><div class="skeleton" style="height:100px"></div></div>`;
       return `<div class="card-head"><h2>People</h2><div class="right">${fmt.plural(t.people.length, "person", "people")}</div></div>
         <div class="table-wrap"><table class="t stack"><thead><tr><th>Name</th><th>Role</th><th class="hide-sm">Added</th><th class="r">Last active</th><th></th></tr></thead><tbody>
-        ${t.people.map((p) => `<tr><td class="name">${esc(p.name)}${p.name === t.me ? ' <span class="pill">You</span>' : ""}</td><td>${p.role === "owner" ? "Owner" : t.me === "owner" ? `<select class="select" style="width:auto;height:28px" data-role-of="${esc(p.name)}" aria-label="Role of ${esc(p.name)}"><option value="member" ${p.role === "member" ? "selected" : ""}>Member</option><option value="viewer" ${p.role === "viewer" ? "selected" : ""}>Viewer</option></select>` : p.role === "viewer" ? "Viewer" : "Member"}</td>
+        ${t.people.map((p) => `<tr><td class="name">${esc(p.name)}${p.name === t.me ? ' <span class="pill">You</span>' : ""}</td><td>${p.role === "owner" ? "Owner" : t.me === "owner" ? `<select class="select" style="width:auto;height:28px" data-role-of="${esc(p.name)}" aria-label="Role of ${esc(p.name)}"><option value="member" ${p.role === "member" ? "selected" : ""}>Member</option><option value="viewer" ${p.role === "viewer" ? "selected" : ""}>Viewer</option><option value="custom" ${p.role === "custom" ? "selected" : ""}>Custom</option></select>${p.role === "custom" ? `<div class="sub" style="max-width:340px;white-space:normal">${accessSummary(p)} <a href="#" data-action="edit-access" data-user="${esc(p.name)}">Edit</a></div>` : ""}` : esc(accessLabel(p))}</td>
           <td class="hide-sm">${p.added ? esc(fmt.when(p.added)) : '<span class="dash">—</span>'}</td><td class="r">${p.seen ? fmt.ago(p.seen) : '<span class="dash">not since this dashboard started</span>'}</td>
           <td class="r">${t.me === "owner" && p.role !== "owner" ? `<button class="btn ghost sm danger" data-action="remove-user" data-user="${esc(p.name)}">Remove</button>` : ""}</td></tr>`).join("")}
         </tbody></table></div>`;
@@ -925,7 +957,8 @@ VIEWS.team = () => ({
       return `<div class="card-head"><h2>Add a teammate</h2></div>
         <form class="card-body" id="add-user" style="display:flex;flex-direction:column;gap:12px">
           <div class="field"><label for="new-user">Name</label><input class="input" id="new-user" placeholder="shreyas" pattern="[a-z][a-z0-9_\\-]{0,23}" required autocomplete="off" spellcheck="false"><span class="hint">Lowercase, used in the audit log.</span></div>
-          <div class="field"><label for="new-role">Role</label><select class="select" id="new-role"><option value="member">Member — deploy, restart, edit env and roll back</option><option value="viewer">Viewer — see everything, change nothing</option></select></div>
+          <div class="field"><label for="new-role">Role</label><select class="select" id="new-role"><option value="member">Member — deploy, restart, edit env and roll back</option><option value="viewer">Viewer — see everything, change nothing</option><option value="custom">Custom — pick what they can do and which apps</option></select></div>
+          <div id="new-custom" class="hidden">${accessPicker(t.caps || {}, [], [], "new")}</div>
           <button class="btn primary" type="submit">${ic("plus")}Create sign-in link</button>
           <div id="new-link" class="hidden"></div>
         </form>`;
@@ -941,7 +974,10 @@ VIEWS.team = () => ({
   },
   mount() {
     $("#page").addEventListener("change", async (e) => {
-      const who = e.target.dataset?.roleOf; if (!who) return;
+      if (e.target.id === "new-role") { $("#new-custom").classList.toggle("hidden", e.target.value !== "custom"); return; }
+      const who = e.target.dataset?.roleOf;
+      if (!who) return;
+      if (e.target.value === "custom") return editAccess(who);
       try { await post(`/api/team/${who}/role`, { role: e.target.value }); toast(`${who} is now a ${e.target.value}`); poll(); }
       catch (err) { toast(err.message, true); }
     });
@@ -950,7 +986,9 @@ VIEWS.team = () => ({
       e.preventDefault();
       const name = $("#new-user").value.trim();
       try {
-        const r = await post("/api/team", { name, role: $("#new-role").value, origin: location.origin });
+        const role = $("#new-role").value;
+        const extra = role === "custom" ? readPicker($("#new-custom")) : {};
+        const r = await post("/api/team", { name, role, ...extra, origin: location.origin });
         const box = $("#new-link"); box.classList.remove("hidden");
         box.innerHTML = `<div class="notice info" style="flex-direction:column;gap:8px"><strong>Send this to ${esc(r.name)}. It is shown once.</strong><div class="fix" style="width:100%"><code>${esc(r.link)}</code><button class="btn ghost icon sm" type="button" data-action="copy" data-text="${esc(r.link)}" aria-label="Copy link">${ic("copy", 14)}</button></div></div>`;
         $("#new-user").value = "";

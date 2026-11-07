@@ -118,7 +118,7 @@ Only want a LAN URL? Skip cloudflared entirely and use `--local`.
 | `hoist db postgres --name votes` | A database in Docker: PostgreSQL, MySQL, MariaDB, Redis or MongoDB. |
 | `hoist link <db> <app>` | Put the database's URL in the app's environment and restart it. |
 | `hoist backup <db> [--daily] [--restore F] [--offsite gdrive:hoist]` | Back up, schedule, restore, copy off-site. |
-| `hoist template <id>` | One-click apps: Uptime Kuma, n8n, ntfy, Excalidraw, PocketBase, Metabase, Open WebUI. |
+| `hoist template <id>` | 46 one-click apps; `hoist template add <Compose file or URL> --name x` adds your own. |
 | `hoist previews <name> on` | Every branch gets its own preview app, removed when the branch is deleted. |
 | `hoist exec <name> -- <command>` | Run one command in the app's folder, container or stack. |
 | `hoist webhook <name>` | Deploy within a second of a push (GitHub or GitLab webhook). |
@@ -203,8 +203,8 @@ Everything the CLI does, in one place, for the whole team:
 - **Databases** with a connection card, one-click linking, daily backups,
   restore and download; **ready-made apps** from the new-app drawer;
   **branch previews**; a **console** that runs one command in the app.
-- **Team**: everyone gets their own sign-in link (`hoist dash --add-user shreyas`,
-  `--role viewer` for read-only with secrets hidden), and an audit log records
+- **Team**: everyone gets their own sign-in link (`hoist dash --add-user shreyas`; `--role viewer` for read-only, or
+  `--role custom --can operate,backups --apps api` to pick exactly what they can do and where), and an audit log records
   who deployed, rolled back or changed what.
 - **Terminal**: an interactive shell in the app, its database or its stack.
 - **Machines**: link other machines running hoist and manage them all from one dashboard.
