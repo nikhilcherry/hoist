@@ -9,7 +9,9 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import config, detect, qr, service, tunnel, ui
+import shutil
+
+from . import config, detect, qr, service, source, tunnel, ui
 
 __version__ = "0.1.0"
 
@@ -182,17 +184,43 @@ def _publish(text: str, hostname: str) -> None:
 
 def cmd_up(args: argparse.Namespace) -> int:
     state = config.load()
+    repo: dict | None = None
 
-    target = Path(args.target).expanduser().resolve() if args.target else Path.cwd()
-    if not target.is_dir():
-        raise UserError(f"not a directory: {target}")
+    if source.is_repo_url(args.target):
+        url = source.normalize_url(args.target)
+        name = detect.slug(args.name or source.repo_name(url))
+        target = source.checkout_dir(name)
+        ui.step(f"cloning {url}")
+        try:
+            branch = source.clone(url, target, getattr(args, "branch", None))
+        except source.SourceError as exc:
+            raise UserError(str(exc)) from exc
+        repo = {"url": url, "branch": branch}
+        ui.ok(f"cloned {branch} @ {source.subject(target)}")
+    else:
+        target = Path(args.target).expanduser().resolve() if args.target else Path.cwd()
+        if not target.is_dir():
+            raise UserError(f"not a directory: {target}")
+        name = detect.slug(args.name or target.name)
 
     if args.cmd:
         command, how = args.cmd, "custom command"
     else:
         command, how = detect.detect_command(target)
 
-    name = detect.slug(args.name or target.name)
+    if repo is not None:
+        build = getattr(args, "build", None)
+        steps = [build] if build else source.detect_build(target, command)
+        if not args.cmd:
+            command = source.use_venv(target, command)
+        ok, detail = source.run_build(target, steps, log=ui.step)
+        if not ok:
+            raise UserError(f"build failed: {detail}")
+        if steps:
+            ui.ok("built")
+        repo.update(sha=source.head(target), build=steps, deployed=config.now(),
+                    commit=source.subject(target))
+
     existing = config.get_app(state, name)
     port = _pick_port(args, existing)
 
@@ -229,6 +257,8 @@ def cmd_up(args: argparse.Namespace) -> int:
         "created": (existing or {}).get("created") or config.now(),
         "updated": config.now(),
     }
+    if repo is not None:
+        app["repo"] = repo
 
     ui.info(f"{ui.bold(name)} {ui.dim('·')} {how} {ui.dim('·')} port {port}")
     ui.step(f"$ {command.replace('$PORT', str(port))}")
@@ -265,6 +295,13 @@ def cmd_up(args: argparse.Namespace) -> int:
         app["lan_ip"] = detect.lan_ip()
         config.put_app(state, app)
         config.save(state)
+
+    if repo is not None and not getattr(args, "no_sync", False):
+        try:
+            source.install_sync_timer(name, service.UNIT_DIR, service.systemctl)
+            ui.ok(f"watching {repo['branch']} — every push redeploys (checks every {source.SYNC_INTERVAL}s)")
+        except source.SourceError as exc:
+            ui.warn(f"auto-deploy not enabled: {exc}")
 
     url = _app_url(app)
     ui.banner(url, f"hoist logs {name}   ·   hoist down {name}")
@@ -313,8 +350,12 @@ def cmd_ls(args: argparse.Namespace) -> int:
             health = ui.red("failed")
         else:
             health = ui.dim(unit_state)
-        rows.append([name, str(app["port"]), health, _app_url(app)])
-    ui.table(rows, ["NAME", "PORT", "STATE", "URL"])
+        repo = app.get("repo")
+        src = f"{repo['branch']}@{repo.get('sha', '')[:7]}" if repo else ui.dim("local")
+        if repo and repo.get("failed_sha"):
+            src += " " + ui.red(f"(build of {repo['failed_sha'][:7]} failed)")
+        rows.append([name, str(app["port"]), health, src, _app_url(app)])
+    ui.table(rows, ["NAME", "PORT", "STATE", "SOURCE", "URL"])
     return 0
 
 
@@ -323,6 +364,11 @@ def cmd_down(args: argparse.Namespace) -> int:
     app = config.get_app(state, args.name)
     if app is None:
         raise UserError(f"no hoisted app called {args.name!r}")
+
+    if app.get("repo"):
+        source.remove_sync_timer(args.name, service.UNIT_DIR, service.systemctl)
+        shutil.rmtree(source.checkout_dir(args.name), ignore_errors=True)
+        ui.ok("stopped watching the repo, checkout removed")
 
     if not app.get("adopted"):
         service.stop_and_remove(args.name)
@@ -356,6 +402,52 @@ def cmd_down(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sync(args: argparse.Namespace) -> int:
+    """Redeploy a git-backed app if its branch has moved. Run by the timer.
+
+    A failed fetch or build never takes the app down: the running process
+    keeps serving the last good commit, and a failed commit is not retried
+    until something newer is pushed.
+    """
+    state = config.load()
+    app = config.get_app(state, args.name)
+    if app is None or not app.get("repo"):
+        raise UserError(f"{args.name!r} is not a git-backed app")
+    repo = app["repo"]
+    target = source.checkout_dir(args.name)
+
+    try:
+        remote = source.remote_head(target, repo["branch"])
+    except source.SourceError as exc:
+        print(f"fetch skipped: {exc}")
+        return 0  # offline or rate-limited; the next tick tries again
+    if remote in (repo.get("sha"), repo.get("failed_sha")) and not args.force:
+        return 0
+
+    source.checkout(target, remote)
+    commit = source.subject(target)
+    print(f"deploying {commit}")
+    ok, detail = source.run_build(target, repo.get("build", []))
+
+    state = config.load()  # re-read: a long build may overlap other hoist commands
+    app = config.get_app(state, args.name)
+    if app is None:
+        return 0  # taken down while we were building
+    if not ok:
+        app["repo"]["failed_sha"] = remote
+        config.save(state)
+        print(f"build failed, still serving {repo.get('sha', '')[:7]}: {detail}")
+        return 0
+
+    service.restart(args.name)
+    health = _wait_for_healthy(args.name, app["port"])
+    app["repo"].update(sha=remote, commit=commit, deployed=config.now())
+    app["repo"].pop("failed_sha", None)
+    config.save(state)
+    print(f"deployed {commit} ({health})")
+    return 0
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     state = config.load()
     app = config.get_app(state, args.name)
@@ -363,6 +455,11 @@ def cmd_logs(args: argparse.Namespace) -> int:
         raise UserError(f"no hoisted app called {args.name!r}")
     if app.get("adopted"):
         raise UserError(f"{args.name} was adopted; hoist does not manage its logs")
+    if getattr(args, "deploys", False):
+        if not app.get("repo"):
+            raise UserError(f"{args.name} is not deployed from git")
+        return service.logs(args.name, lines=args.lines, follow=args.follow,
+                            unit=f"{source.sync_unit_base(args.name)}.service")
     return service.logs(args.name, lines=args.lines, follow=args.follow)
 
 
@@ -511,8 +608,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--no-qr", action="store_true", help="do not print a QR code")
         p.add_argument("--ascii", action="store_true", help="QR without ANSI colour")
 
-    up = sub.add_parser("up", help="hoist a directory onto a public URL")
-    up.add_argument("target", nargs="?", help="project directory (default: cwd)")
+    up = sub.add_parser("up", help="hoist a directory or git repo onto a public URL")
+    up.add_argument("target", nargs="?",
+                    help="project directory (default: cwd) or git URL, e.g. github.com/team/app")
     up.add_argument("--name", help="app name and subdomain label")
     up.add_argument("--port", type=int, help="port to run on (default: auto)")
     up.add_argument("--cmd", help="start command; $PORT is substituted")
@@ -520,6 +618,10 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--hostname", help="full hostname, overriding <name>.<domain>")
     up.add_argument("--env", action="append", metavar="K=V", help="extra env var")
     up.add_argument("--local", action="store_true", help="LAN URL only, no tunnel")
+    up.add_argument("--branch", help="git branch to deploy (repo URLs only)")
+    up.add_argument("--build", help="build command for a repo, overriding detection")
+    up.add_argument("--no-sync", action="store_true",
+                    help="deploy a repo once, without redeploying on push")
     add_qr_flags(up)
     up.set_defaults(func=cmd_up)
 
@@ -541,10 +643,17 @@ def build_parser() -> argparse.ArgumentParser:
     down.add_argument("name")
     down.set_defaults(func=cmd_down)
 
+    sync = sub.add_parser("sync", help="redeploy a git-backed app if its branch moved")
+    sync.add_argument("name")
+    sync.add_argument("--force", action="store_true", help="rebuild even if up to date")
+    sync.set_defaults(func=cmd_sync)
+
     logs = sub.add_parser("logs", help="show an app's logs")
     logs.add_argument("name")
     logs.add_argument("-n", "--lines", type=int, default=50)
     logs.add_argument("-f", "--follow", action="store_true")
+    logs.add_argument("--deploys", action="store_true",
+                      help="show the push-to-deploy log instead of the app's")
     logs.set_defaults(func=cmd_logs)
 
     restart = sub.add_parser("restart", help="restart an app")
@@ -581,7 +690,8 @@ def main(argv: list[str] | None = None) -> int:
     except UserError as exc:
         ui.fail(str(exc))
         return 1
-    except (tunnel.TunnelError, service.ServiceError, detect.DetectionError) as exc:
+    except (tunnel.TunnelError, service.ServiceError, detect.DetectionError,
+            source.SourceError) as exc:
         ui.fail(str(exc))
         return 1
     except KeyboardInterrupt:

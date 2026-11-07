@@ -22,6 +22,11 @@ class ServiceError(Exception):
     pass
 
 
+def systemctl(*args: str) -> subprocess.CompletedProcess:
+    """`systemctl --user`, for modules that manage their own units."""
+    return _systemctl(*args)
+
+
 def unit_name(name: str) -> str:
     return f"{PREFIX}{name}.service"
 
@@ -146,9 +151,9 @@ def status(name: str) -> str:
     return _systemctl("is-active", unit_name(name)).stdout.strip() or "unknown"
 
 
-def logs(name: str, lines: int = 50, follow: bool = False) -> int:
+def logs(name: str, lines: int = 50, follow: bool = False, unit: str | None = None) -> int:
     args = [
-        "journalctl", "--user", "-u", unit_name(name),
+        "journalctl", "--user", "-u", unit or unit_name(name),
         "-n", str(lines), "--no-pager",
     ]
     if follow:

@@ -100,10 +100,12 @@ Only want a LAN URL? Skip cloudflared entirely and use `--local`.
 | Command | What it does |
 | --- | --- |
 | `hoist up [dir]` | Run a project and publish it. Detects the start command. |
+| `hoist up <git-url>` | Clone, build and publish a repo, then redeploy on every push. |
+| `hoist sync <name>` | Redeploy a repo app now if its branch moved (the timer runs this). |
 | `hoist share [dir]` | Serve a folder of files publicly. No project needed. |
 | `hoist ls` | Every hoisted app, its port, health and URL. |
 | `hoist down <name>` | Stop it and remove its ingress rule. |
-| `hoist logs <name> [-f]` | Tail the app's journald logs. |
+| `hoist logs <name> [-f]` | Tail the app's journald logs. `--deploys` shows the push-to-deploy log. |
 | `hoist restart <name>` | Restart the service. |
 | `hoist url <name>` | Print the URL (pipe it into `xdg-open`, Slack, etc). |
 | `hoist qr <name>` | Reprint the QR code. |
@@ -121,6 +123,43 @@ hoist up ./api --env DATABASE_URL=postgres://localhost/dev
 hoist up ./site --local                      # LAN URL + QR, no tunnel, no internet
 hoist up ./site --domain example.com         # remembered for next time
 ```
+
+## Push to deploy
+
+Point `hoist up` at a repo instead of a folder and your teammates deploy by
+pushing. They need no access to your machine, no account and no CLI:
+
+```bash
+hoist up github.com/team/project --name team
+# ✓ cloned main @ a9f8649 mate: first page
+# ✓ built
+# ✓ watching main — every push redeploys (checks every 20s)
+#   https://team.example.com
+```
+
+hoist clones into its own checkout, runs the install/build the project needs
+(`npm ci` + `npm run build`, a `.venv` from `requirements.txt`, …), starts
+it, and installs a systemd timer that fetches the branch every 20 seconds.
+A new commit is checked out, built, and the service restarted.
+
+- **A broken push never takes the demo down.** If the build fails, the app
+  keeps serving the last good commit, `hoist ls` shows the failure, and that
+  commit is not retried until someone pushes again.
+- **Offline is fine.** A failed fetch is skipped; the next tick tries again.
+- **Polling, not webhooks**, so nothing has to accept inbound connections and
+  it works on venue Wi-Fi that blocks them.
+- Private repos use whatever git credentials this machine already has
+  (`gh auth login`, an SSH key).
+
+```bash
+hoist up git@github.com:team/api.git --branch demo   # track another branch
+hoist up github.com/team/web --build 'npm ci && npm run build:prod'
+hoist up github.com/team/web --no-sync               # deploy once, don't watch
+hoist logs team --deploys -f                         # watch deploys happen
+hoist sync team --force                              # rebuild right now
+```
+
+`hoist down team` stops the watcher and deletes the checkout as well.
 
 ## What it detects
 
