@@ -253,9 +253,16 @@ def ensure_dockerfile_compose(directory: Path) -> Path:
     return path
 
 
-def compose_down(app: str) -> None:
+def compose_down(app: str, purge: bool = False) -> list[str]:
+    """Stop and remove a stack. Its volumes are kept unless `purge`; returns the kept ones."""
     subprocess.run([*shlex.split(docker()), "compose", "-p", compose_project(app), "down",
-                    "--remove-orphans"], capture_output=True, text=True, timeout=180)
+                    "--remove-orphans", *(["--volumes"] if purge else [])],
+                   capture_output=True, text=True, timeout=180)
+    if purge:
+        return []
+    listing = run("volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={compose_project(app)}",
+                  timeout=30)
+    return listing.stdout.split()
 
 
 # --- backups --------------------------------------------------------------------

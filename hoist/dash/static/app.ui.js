@@ -383,7 +383,7 @@ async function doAction(action, name, el) {
         body: `The process stops and <strong>${esc(a?.public ? a.hostname : a?.url || name)}</strong> stops answering. ${a?.repo ? "Its watcher and checkout are removed. " : ""}The DNS record and your code are left alone.` });
       if (!ok) return;
       let purge = false;
-      if (a?.kind === "db") purge = await confirmDialog({ title: `Delete ${name}'s data too?`, body: `The volume <span class="mono">${esc(a.db?.volume)}</span> holds every row. Keep it and a database with the same name picks it up again; delete it and it is gone for good.`, ok: "Delete the data", danger: true });
+      if (a?.kind === "db" || a?.kind === "compose") purge = await confirmDialog({ title: `Delete ${name}'s data too?`, body: a.kind === "db" ? `The volume <span class="mono">${esc(a.db?.volume)}</span> holds every row. Keep it and a database with the same name picks it up again; delete it and it is gone for good.` : "The stack's Docker volumes hold its data. Keep them and redeploying with the same name picks them up again; delete them and they are gone for good.", ok: "Delete the data", danger: true });
       const r = await post(`/api/apps/${name}/delete`, { purge });
       jobDrawer(r.job, { title: `Taking down ${name}` });
       if (current().name === "app") go("/apps");

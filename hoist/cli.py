@@ -437,8 +437,10 @@ def cmd_down(args: argparse.Namespace) -> int:
         service.stop_and_remove(args.name)
         ui.ok("service stopped and removed")
     if app.get("kind") == "compose":
-        containers.compose_down(args.name)
-        ui.ok("compose stack removed")
+        kept = containers.compose_down(args.name, purge=getattr(args, "purge", False))
+        ui.ok("compose stack removed" + (" with its volumes" if getattr(args, "purge", False) else ""))
+        if kept:
+            ui.step(f"data kept in {', '.join(kept)} — `hoist down {args.name} --purge` deletes it")
     if app.get("kind") == "db":
         containers.run("rm", "-f", containers.container_name(args.name), timeout=60)
         base = containers.backup_unit_base(args.name)
@@ -1312,7 +1314,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     down = sub.add_parser("down", help="stop an app and remove its ingress rule")
     down.add_argument("name")
-    down.add_argument("--purge", action="store_true", help="for a database, also delete its data")
+    down.add_argument("--purge", action="store_true", help="also delete a database's or stack's data volumes")
     down.set_defaults(func=cmd_down)
 
     sync = sub.add_parser("sync", help="redeploy a git-backed app if its branch moved")
