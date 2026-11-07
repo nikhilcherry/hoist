@@ -20,7 +20,7 @@ the method, raw logs and caveats are in [benchmark.md](benchmark.md).
 | Dashboard API call (median) | 3.5 ms | 24.1 ms |
 | Push→live, Dockerfile app (median of 5) | 1.88 s | 2.53 s |
 | Downtime while a container app is replaced | 0.65–1.45 s | ≈ 0.1 s |
-| Idle CPU | 0.33 % | ≈ 0.1 % |
+| Idle CPU (nothing watching) | 0.30 % | ≈ 0.1 % |
 
 Dokploy is ahead on seamless rollover and idle CPU. hoist is ahead on the rest.
 

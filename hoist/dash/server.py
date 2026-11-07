@@ -295,6 +295,7 @@ def make_handler(dash: Dashboard):
 
         def _api_get(self, path: str, query: dict) -> None:
             if path == "/api/state":
+                dash.monitor.touch()
                 snap = dash.monitor.get()
                 seen = team.scope(self.user)
                 if seen is not None:
