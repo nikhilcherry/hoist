@@ -146,19 +146,25 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_wait_for_healthy", lambda *_a, **_k: "up")
 
     url = f"file://{remote}"
-    checkout = source.checkout_dir("demo")
-    branch = source.clone(url, checkout, None)
+    cache = source.checkout_dir("demo")
+    branch = source.clone(url, cache, None)
+    sha = source.head(cache)
+    first = source.prepare_release("demo", cache, sha)
+    source.mark_built(first)
+    source.activate("demo", first)
     state = config.load()
     config.put_app(state, {
         "name": "demo", "port": 9999, "tunnel": False,
-        "repo": {"url": url, "branch": branch, "sha": source.head(checkout), "build": []},
+        "workdir": str(source.current_link("demo")), "cmd": "python3 -m http.server $PORT",
+        "repo": {"url": url, "branch": branch, "sha": sha, "build": []},
     })
     config.save(state)
-    return {"mate": mate, "checkout": checkout, "restarts": restarts}
+    return {"mate": mate, "checkout": source.current_link("demo"), "first": first,
+            "restarts": restarts}
 
 
 def _sync(force=False):
-    return cli.cmd_sync(argparse.Namespace(name="demo", force=force))
+    return cli.cmd_sync(argparse.Namespace(name="demo", force=force, to=None))
 
 
 def _push(mate, text, msg):
@@ -215,9 +221,55 @@ def test_offline_fetch_is_skipped_quietly(world, monkeypatch):
     assert world["restarts"] == []
 
 
-def test_installed_deps_survive_a_redeploy(world):
-    (world["checkout"] / "node_modules").mkdir()
-    (world["checkout"] / "node_modules" / "dep.js").write_text("x")
+def test_a_broken_build_never_touches_the_files_being_served(world):
+    """The bug this pins: a deploy used to rewrite the live checkout in place,
+    so a failed build left the running app reading files that were gone."""
+    state = config.load()
+    state["apps"]["demo"]["repo"]["build"] = ["rm index.html; exit 1"]
+    config.save(state)
+    _push(world["mate"], "v2", "deletes its own page then fails")
+    _sync()
+    live = world["checkout"]
+    assert live.resolve() == world["first"]
+    assert (live / "index.html").read_text() == "v1"
+
+
+def test_rollback_reuses_a_kept_release_without_rebuilding(world):
+    first_sha = config.load()["apps"]["demo"]["repo"]["sha"]
     _push(world["mate"], "v2", "second")
     _sync()
-    assert (world["checkout"] / "node_modules" / "dep.js").exists()
+    state = config.load()
+    state["apps"]["demo"]["repo"]["build"] = ["echo this must not run; exit 1"]
+    config.save(state)
+    assert cli.cmd_sync(argparse.Namespace(name="demo", force=False, to=first_sha)) == 0
+    repo = config.load()["apps"]["demo"]["repo"]
+    assert repo["sha"] == first_sha and repo["paused"] is True
+    assert "reusing" in repo["history"][0]["log"][0]
+    assert (world["checkout"] / "index.html").read_text() == "v1"
+
+
+def test_old_releases_are_pruned(world):
+    for i in range(6):
+        _push(world["mate"], f"v{i + 2}", f"push {i}")
+        _sync()
+    root = source.releases_dir("demo")
+    kept = [p for p in root.iterdir() if p.is_dir() and not p.is_symlink()]
+    assert len(kept) <= source.KEEP_RELEASES
+    assert (world["checkout"] / "index.html").read_text() == "v7"
+
+
+def test_node_modules_are_hardlinked_when_the_lockfile_is_unchanged(world, tmp_path):
+    live = world["checkout"].resolve()
+    (live / "package-lock.json").write_text("{}")
+    (live / "node_modules").mkdir()
+    (live / "node_modules" / "dep.js").write_text("x")
+    _git(world["mate"], "rm", "-q", "--cached", "index.html")
+    (world["mate"] / "package-lock.json").write_text("{}")
+    (world["mate"] / "index.html").write_text("v2")
+    _git(world["mate"], "add", ".")
+    _git(world["mate"], "commit", "-qm", "lockfile")
+    _git(world["mate"], "push", "-q", "origin", "main")
+    _sync()
+    new = world["checkout"].resolve()
+    assert new != live
+    assert (new / "node_modules" / "dep.js").stat().st_ino == (live / "node_modules" / "dep.js").stat().st_ino

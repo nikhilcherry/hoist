@@ -60,12 +60,41 @@ def build_exec_start(cmd: str) -> str:
     return " ".join(shlex.quote(p) for p in parts)
 
 
+def env_line(key: str, value: str) -> str:
+    """One `Environment=` line that systemd reads back as exactly key=value.
+
+    `%` starts a unit specifier and must be doubled; spaces, quotes and
+    backslashes need the double-quoted form.
+    """
+    value = str(value).replace("%", "%%")
+    if any(ch in value for ch in " \t\"'\\") or value == "":
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'Environment="{key}={escaped}"\n'
+    return f"Environment={key}={value}\n"
+
+
+LIMIT_MEMORY = r"^[1-9][0-9]{0,5}[KMG]$"
+LIMIT_CPU = r"^[1-9][0-9]{0,3}%$"
+
+
+def _high(memory: str) -> str:
+    number, unit = int(memory[:-1]), memory[-1]
+    return f"{max(1, number * 9 // 10)}{unit}"
+
+
 def render_unit(app: dict) -> str:
     """Build the unit file text for `app`."""
     cmd = app["cmd"].replace("$PORT", str(app["port"]))
     exec_start = build_exec_start(cmd)
+    limits = app.get("limits") or {}
+    limit_lines = ""
+    if limits.get("memory"):
+        # MemoryHigh throttles first, so a leak slows down before it is killed.
+        limit_lines += f"MemoryMax={limits['memory']}\nMemoryHigh={_high(limits['memory'])}\n"
+    if limits.get("cpu"):
+        limit_lines += f"CPUQuota={limits['cpu']}\n"
     env_lines = "".join(
-        f"Environment={k}={v}\n" for k, v in sorted(app.get("env", {}).items())
+        env_line(k, v) for k, v in sorted(app.get("env", {}).items())
     )
     return f"""[Unit]
 Description=hoist: {app['name']}
@@ -81,7 +110,7 @@ Type=simple
 WorkingDirectory={app['workdir']}
 Environment=PORT={app['port']}
 Environment=HOIST_APP={app['name']}
-{env_lines}ExecStart={exec_start}
+{env_lines}{limit_lines}ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2
 StandardOutput=journal

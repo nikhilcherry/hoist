@@ -18,6 +18,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from . import config
@@ -118,11 +120,120 @@ def checkout(dest: Path, sha: str) -> None:
     _git("clean", "-fd", cwd=dest)
 
 
-def subject(dest: Path) -> str:
+def subject(dest: Path, sha: str | None = None) -> str:
     try:
-        return _git("log", "-1", "--format=%h %an: %s", cwd=dest)
+        return _git("log", "-1", "--format=%h %an: %s", *([sha] if sha else []), cwd=dest)
     except SourceError:
         return ""
+
+
+# --- releases -------------------------------------------------------------------
+#
+# The checkout above is only a git cache. Every deploy is exported from it into
+# its own release directory, built there, and only then made live by swapping
+# the `current` symlink. The running process keeps its own working directory
+# (the release it started in), so a build that fails half way -- or one that
+# deletes files -- never touches what is serving. Recent releases are kept, so
+# rolling back to one of them is a symlink swap and a restart, no rebuild.
+
+KEEP_RELEASES = 4
+BUILT_MARK = ".hoist-built"
+
+
+def releases_dir(name: str) -> Path:
+    return REPO_DIR / ".releases" / name
+
+
+def current_link(name: str) -> Path:
+    return releases_dir(name) / "current"
+
+
+def live_release(name: str) -> Path | None:
+    link = current_link(name)
+    return link.resolve() if link.is_symlink() else None
+
+
+def find_release(name: str, sha: str) -> Path | None:
+    """A previously built release of `sha`, newest first, if one is kept."""
+    root = releases_dir(name)
+    if not root.is_dir():
+        return None
+    found = sorted((p for p in root.iterdir() if p.is_dir() and not p.is_symlink()
+                    and p.name.endswith(sha[:12]) and (p / BUILT_MARK).exists()),
+                   key=lambda p: p.name, reverse=True)
+    return found[0] if found else None
+
+
+def prepare_release(name: str, cache: Path, sha: str) -> Path:
+    """Export `sha` from the git cache into a fresh release directory."""
+    root = releases_dir(name)
+    root.mkdir(parents=True, exist_ok=True)
+    dest = root / f"{int(time.time() * 1000)}-{sha[:12]}"
+    dest.mkdir()
+    archive = subprocess.run(["git", "archive", "--format=tar", sha], cwd=cache,
+                             capture_output=True)
+    if archive.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise SourceError(f"git archive failed: {archive.stderr.decode(errors='replace').strip()}")
+    unpack = subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, capture_output=True)
+    if unpack.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise SourceError(f"could not unpack the release: {unpack.stderr.decode(errors='replace').strip()}")
+    _reuse_node_modules(name, dest)
+    return dest
+
+
+def _reuse_node_modules(name: str, dest: Path) -> None:
+    """Hard-link the live release's node_modules when the lockfile is unchanged.
+
+    Cheap (no bytes copied) and safe: npm replaces files rather than editing
+    them in place, so the live release's copy is never modified.
+    """
+    live = live_release(name)
+    if not live or not (live / "node_modules").is_dir():
+        return
+    for lock in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock"):
+        old, new = live / lock, dest / lock
+        if old.is_file() and new.is_file() and old.read_bytes() == new.read_bytes():
+            subprocess.run(["cp", "-al", str(live / "node_modules"), str(dest / "node_modules")],
+                           capture_output=True)
+            return
+
+
+def mark_built(release: Path) -> None:
+    (release / BUILT_MARK).write_text(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n")
+
+
+def activate(name: str, release: Path) -> None:
+    """Point `current` at `release` atomically."""
+    link = current_link(name)
+    tmp = link.with_name(f".current-{os.getpid()}")
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
+    os.symlink(release.name, tmp)
+    os.replace(tmp, link)
+
+
+def prune_releases(name: str, keep: int = KEEP_RELEASES) -> None:
+    root = releases_dir(name)
+    if not root.is_dir():
+        return
+    live = live_release(name)
+    dirs = sorted((p for p in root.iterdir() if p.is_dir() and not p.is_symlink()),
+                  key=lambda p: p.name, reverse=True)
+    kept = 0
+    for path in dirs:
+        if path == live:
+            continue
+        if kept < keep - 1 and (path / BUILT_MARK).exists():
+            kept += 1
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def remove_all(name: str) -> None:
+    shutil.rmtree(checkout_dir(name), ignore_errors=True)
+    shutil.rmtree(releases_dir(name), ignore_errors=True)
 
 
 # --- building -----------------------------------------------------------------
@@ -169,21 +280,66 @@ def use_venv(directory: Path, command: str) -> str:
     return command
 
 
-def run_build(directory: Path, steps: list[str], log=print) -> tuple[bool, str]:
-    """Run each step in a login shell. Returns (ok, tail of output on failure)."""
+def run_build(directory: Path, steps: list[str], log=print,
+              transcript: list[str] | None = None) -> tuple[bool, str]:
+    """Run each step in a login shell, streaming its output through `log`.
+
+    Returns (ok, the step and the tail of its output on failure). Every line,
+    commands included, is also appended to `transcript` when one is given --
+    that is what a deploy's history entry keeps.
+    """
+    record = transcript if transcript is not None else []
+
+    def say(line: str) -> None:
+        record.append(line)
+        log(line)
+
     for step in steps:
-        log(f"$ {step}")
+        say(f"$ {step}")
+        proc = subprocess.Popen(
+            ["/bin/sh", "-lc", step], cwd=directory, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, errors="replace",
+        )
+        timed_out = threading.Event()
+
+        def kill() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(BUILD_TIMEOUT, kill)
+        timer.start()
+        lines: list[str] = []
         try:
-            result = subprocess.run(
-                ["/bin/sh", "-lc", step], cwd=directory, capture_output=True,
-                text=True, timeout=BUILD_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.rstrip("\n")
+                lines.append(line)
+                say(line)
+            proc.wait()
+        finally:
+            timer.cancel()
+        if timed_out.is_set():
             return False, f"{step}: timed out after {BUILD_TIMEOUT // 60} min"
-        if result.returncode != 0:
-            tail = "\n".join((result.stdout + result.stderr).strip().splitlines()[-12:])
-            return False, f"{step} exited {result.returncode}\n{tail}"
+        if proc.returncode != 0:
+            tail = "\n".join(lines[-12:])
+            return False, f"{step} exited {proc.returncode}\n{tail}"
     return True, ""
+
+
+def fetch_sha(dest: Path, sha: str) -> str:
+    """Make one specific commit available in the shallow checkout (rollback)."""
+    _git("fetch", "--depth", "1", "origin", sha, cwd=dest, timeout=120)
+    return _git("rev-parse", "FETCH_HEAD", cwd=dest)
+
+
+HISTORY_LIMIT = 30
+
+
+def record_deploy(repo: dict, entry: dict) -> None:
+    """Prepend a deploy to the app's history, keeping the newest few."""
+    history = repo.setdefault("history", [])
+    history.insert(0, entry)
+    del history[HISTORY_LIMIT:]
 
 
 # --- the sync timer -------------------------------------------------------------

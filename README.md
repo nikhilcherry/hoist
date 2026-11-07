@@ -110,6 +110,12 @@ Only want a LAN URL? Skip cloudflared entirely and use `--local`.
 | `hoist url <name>` | Print the URL (pipe it into `xdg-open`, Slack, etc). |
 | `hoist qr <name>` | Reprint the QR code. |
 | `hoist adopt <name> --port N` | Publish something already running (Docker, `npm run dev`). |
+| `hoist dash` | Open the web dashboard (below). `--service` keeps it running. |
+| `hoist pause / resume <name>` | Stop or restart redeploying a repo app on push. |
+| `hoist stop / start <name>` | Stop an app's process, keeping its URL and config. |
+| `hoist sync <name> --to <sha>` | Roll back to an earlier commit (pauses auto-deploy). |
+| `hoist limit <name> --memory 512M --cpu 50%` | Cap an app's resources. |
+| `hoist notify <webhook>` | Deploy, failed-build and downtime alerts to Discord, Slack, ntfy or Telegram. |
 | `hoist doctor` | Check systemd, cloudflared, tunnel, domain, permissions. |
 
 <img src="docs/demo-ls.svg" width="557" alt="hoist ls listing two apps with their port, state and URL — one published through the tunnel, one on the LAN">
@@ -160,6 +166,45 @@ hoist sync team --force                              # rebuild right now
 ```
 
 `hoist down team` stops the watcher and deletes the checkout as well.
+
+## The dashboard
+
+```bash
+hoist dash --service      # runs on 127.0.0.1:7457, survives reboots; prints a sign-in link once
+hoist dash --public dash  # optional: also at https://dash.<your-domain>, behind the same token
+```
+
+Everything the CLI does, in one place, for the whole team:
+
+- **Overview** that answers "can a judge open every app right now?" — each app's
+  public URL is checked every 30 s, and anything not answering says why
+  (*nothing is listening on port 8420*, *its public URL answers 502*).
+- **The route strip** on every app: source → build → process → port → public URL,
+  each hop live, so you see which one broke.
+- **Deployments** with the commit, author, trigger and build log of every push;
+  one-click **rollback** (instant when the release is still on disk) and redeploy.
+- **Live logs** streamed from the journal, with search, follow and download —
+  the app's output or the deploy log.
+- **Environment variables** editor (paste a `.env`), **resource limits**, stop/start,
+  pause auto-deploy, take down.
+- **New app** from a git URL or a folder, with the build streaming as it runs.
+- **Routes** (every hostname on the tunnel, hand-written ones too, with a one-hour
+  uptime strip), **Machine** (CPU, memory, disk, the `hoist doctor` checks with
+  copyable fixes), **notifications** and a QR code for every app.
+- Command palette on <kbd>Ctrl</kbd> <kbd>K</kbd>, <kbd>N</kbd> for a new app, light and dark.
+
+Zero dependencies like the rest of hoist: a standard-library server and one page
+of plain JavaScript, fonts bundled so it works with no internet. A token guards
+it (HttpOnly cookie plus a header every write must carry), because behind a
+tunnel every request arrives from 127.0.0.1.
+
+### How a deploy can never take the demo down
+
+Every deploy is exported from git into its own release directory, built there,
+and only then made live by swapping a `current` symlink and restarting. The
+running process keeps serving its own release the whole time, so a push that
+fails to build — or deletes files halfway — never touches it. The last four
+releases are kept, which is why rolling back to one of them needs no rebuild.
 
 ## What it detects
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import sys
 import time
@@ -10,8 +11,9 @@ import urllib.request
 from pathlib import Path
 
 import shutil
+import subprocess
 
-from . import config, detect, qr, service, source, tunnel, ui
+from . import config, detect, notify, qr, service, source, tunnel, ui
 
 __version__ = "0.1.0"
 
@@ -189,14 +191,16 @@ def cmd_up(args: argparse.Namespace) -> int:
     if source.is_repo_url(args.target):
         url = source.normalize_url(args.target)
         name = detect.slug(args.name or source.repo_name(url))
-        target = source.checkout_dir(name)
+        cache = source.checkout_dir(name)
         ui.step(f"cloning {url}")
         try:
-            branch = source.clone(url, target, getattr(args, "branch", None))
+            branch = source.clone(url, cache, getattr(args, "branch", None))
+            sha = source.head(cache)
+            target = source.prepare_release(name, cache, sha)
         except source.SourceError as exc:
             raise UserError(str(exc)) from exc
         repo = {"url": url, "branch": branch}
-        ui.ok(f"cloned {branch} @ {source.subject(target)}")
+        ui.ok(f"cloned {branch} @ {source.subject(cache)}")
     else:
         target = Path(args.target).expanduser().resolve() if args.target else Path.cwd()
         if not target.is_dir():
@@ -211,15 +215,27 @@ def cmd_up(args: argparse.Namespace) -> int:
     if repo is not None:
         build = getattr(args, "build", None)
         steps = [build] if build else source.detect_build(target, command)
-        if not args.cmd:
-            command = source.use_venv(target, command)
         ok, detail = source.run_build(target, steps, log=ui.step)
         if not ok:
+            shutil.rmtree(target, ignore_errors=True)
             raise UserError(f"build failed: {detail}")
         if steps:
             ui.ok("built")
-        repo.update(sha=source.head(target), build=steps, deployed=config.now(),
-                    commit=source.subject(target))
+        source.mark_built(target)
+        source.activate(name, target)
+        source.prune_releases(name)
+        target = source.current_link(name)
+        if not args.cmd:
+            command = source.use_venv(target, command)
+        repo.update(sha=sha, build=steps, deployed=config.now(),
+                    commit=source.subject(cache, sha))
+        previous = config.get_app(state, name)
+        if previous and (previous.get("repo") or {}).get("history"):
+            repo["history"] = previous["repo"]["history"]
+        source.record_deploy(repo, {
+            "sha": repo["sha"], "commit": repo["commit"], "at": config.now(),
+            "trigger": "initial", "status": "ok", "seconds": 0, "log": [],
+        })
 
     existing = config.get_app(state, name)
     port = _pick_port(args, existing)
@@ -334,6 +350,8 @@ def cmd_ls(args: argparse.Namespace) -> int:
     for name in sorted(apps):
         app = apps[name]
         unit_state = "adopted" if app.get("adopted") else service.status(name)
+        if app.get("stopped"):
+            unit_state = "stopped"
         listening = detect.port_in_use(app["port"])
         if listening and unit_state in ("active", "adopted"):
             health = ui.green("up")
@@ -352,6 +370,8 @@ def cmd_ls(args: argparse.Namespace) -> int:
             health = ui.dim(unit_state)
         repo = app.get("repo")
         src = f"{repo['branch']}@{repo.get('sha', '')[:7]}" if repo else ui.dim("local")
+        if repo and repo.get("paused"):
+            src += " " + ui.yellow("(paused)")
         if repo and repo.get("failed_sha"):
             src += " " + ui.red(f"(build of {repo['failed_sha'][:7]} failed)")
         rows.append([name, str(app["port"]), health, src, _app_url(app)])
@@ -367,7 +387,7 @@ def cmd_down(args: argparse.Namespace) -> int:
 
     if app.get("repo"):
         source.remove_sync_timer(args.name, service.UNIT_DIR, service.systemctl)
-        shutil.rmtree(source.checkout_dir(args.name), ignore_errors=True)
+        source.remove_all(args.name)
         ui.ok("stopped watching the repo, checkout removed")
 
     if not app.get("adopted"):
@@ -407,7 +427,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     A failed fetch or build never takes the app down: the running process
     keeps serving the last good commit, and a failed commit is not retried
-    until something newer is pushed.
+    until something newer is pushed. `--to <sha>` rolls back to an earlier
+    commit and pauses auto-deploy, so the next tick does not undo it.
     """
     state = config.load()
     app = config.get_app(state, args.name)
@@ -415,36 +436,154 @@ def cmd_sync(args: argparse.Namespace) -> int:
         raise UserError(f"{args.name!r} is not a git-backed app")
     repo = app["repo"]
     target = source.checkout_dir(args.name)
+    to = getattr(args, "to", None)
+    manual = bool(args.force or to)
+
+    if not manual and (repo.get("paused") or app.get("stopped")):
+        return 0
+
+    # One deploy per app at a time: the timer and a dashboard redeploy can
+    # otherwise build the same app concurrently.
+    lock_path = source.releases_dir(args.name)
+    lock_path.mkdir(parents=True, exist_ok=True)
+    lock = open(lock_path / ".deploy-lock", "a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | (0 if manual else fcntl.LOCK_NB))
+    except BlockingIOError:
+        return 0  # a deploy is already running; the next tick re-checks
 
     try:
-        remote = source.remote_head(target, repo["branch"])
+        wanted = source.fetch_sha(target, to) if to else source.remote_head(target, repo["branch"])
     except source.SourceError as exc:
+        if manual:
+            raise UserError(str(exc)) from exc
         print(f"fetch skipped: {exc}")
         return 0  # offline or rate-limited; the next tick tries again
-    if remote in (repo.get("sha"), repo.get("failed_sha")) and not args.force:
+    if wanted in (repo.get("sha"), repo.get("failed_sha")) and not manual:
         return 0
 
-    source.checkout(target, remote)
-    commit = source.subject(target)
-    print(f"deploying {commit}")
-    ok, detail = source.run_build(target, repo.get("build", []))
+    started = time.monotonic()
+    commit = source.subject(target, wanted)
+    trigger = "rollback" if to else ("manual" if args.force else "push")
+    print(f"deploying {commit} ({trigger})")
+    transcript: list[str] = []
+    release = source.find_release(args.name, wanted) if to else None
+    if release is not None:
+        ok, detail = True, ""
+        transcript.append(f"reusing the release built earlier: {release.name}")
+        print(transcript[-1])
+    else:
+        try:
+            release = source.prepare_release(args.name, target, wanted)
+        except source.SourceError as exc:
+            if manual:
+                raise UserError(str(exc)) from exc
+            print(f"skipped: {exc}")
+            return 0
+        ok, detail = source.run_build(release, repo.get("build", []), transcript=transcript)
 
-    state = config.load()  # re-read: a long build may overlap other hoist commands
-    app = config.get_app(state, args.name)
-    if app is None:
-        return 0  # taken down while we were building
+    entry = {"sha": wanted, "commit": commit, "at": config.now(), "trigger": trigger,
+             "seconds": round(time.monotonic() - started, 1)}
     if not ok:
-        app["repo"]["failed_sha"] = remote
-        config.save(state)
+        shutil.rmtree(release, ignore_errors=True)  # never live, never needed
+        entry.update(status="failed", log=transcript[-60:], error=detail.splitlines()[0])
+        with config.transaction() as state:  # re-read: the build may have run for minutes
+            app = config.get_app(state, args.name)
+            if app is None:
+                return 0  # taken down while we were building
+            app["repo"]["failed_sha"] = wanted
+            source.record_deploy(app["repo"], entry)
         print(f"build failed, still serving {repo.get('sha', '')[:7]}: {detail}")
-        return 0
+        notify.send(f"{args.name}: push {wanted[:7]} failed to build",
+                    f"{commit}\n{detail.splitlines()[0]}\nStill serving {repo.get('sha', '')[:7]}.",
+                    level="bad", app=args.name)
+        return 1 if manual else 0
 
-    service.restart(args.name)
-    health = _wait_for_healthy(args.name, app["port"])
-    app["repo"].update(sha=remote, commit=commit, deployed=config.now())
-    app["repo"].pop("failed_sha", None)
-    config.save(state)
+    with config.transaction() as state:
+        app = config.get_app(state, args.name)
+        if app is None:
+            shutil.rmtree(release, ignore_errors=True)
+            return 0
+        source.mark_built(release)
+        source.activate(args.name, release)
+        source.prune_releases(args.name)
+        link = str(source.current_link(args.name))
+        if app.get("workdir") != link:
+            # An app deployed before releases existed ran straight from the git
+            # cache; point its unit at the release link from now on.
+            app["workdir"] = link
+            app["cmd"] = app.get("cmd", "").replace(str(target), link)
+            service.write_unit(app)
+        app["repo"].update(sha=wanted, commit=commit, deployed=config.now())
+        app["repo"].pop("failed_sha", None)
+        if to:
+            app["repo"]["paused"] = True
+        stopped, port = bool(app.get("stopped")), int(app["port"])
+        hostname = app.get("hostname") if app.get("tunnel") else None
+
+    # Restart and wait outside the lock: health checks take seconds.
+    if not stopped:
+        service.restart(args.name)
+        health = _wait_for_healthy(args.name, port)
+    else:
+        health = "stopped"
+    entry.update(status="ok" if health in ("up", "stopped") else "unhealthy",
+                 seconds=round(time.monotonic() - started, 1), log=transcript[-60:])
+    with config.transaction() as state:
+        app = config.get_app(state, args.name)
+        if app is not None:
+            source.record_deploy(app["repo"], entry)
     print(f"deployed {commit} ({health})")
+    notify.send(f"{args.name} deployed {wanted[:7]}" + (" (rollback)" if to else ""),
+                f"{commit}\n{'https://' + hostname if hostname else ''}".strip(),
+                level="ok" if entry["status"] == "ok" else "warn", app=args.name)
+    if to:
+        print("auto-deploy paused after rollback — resume with: hoist resume " + args.name)
+    return 0
+
+
+def _set_flag(name: str, key: str, value: bool, *, repo: bool = False) -> dict:
+    with config.transaction() as state:
+        app = config.get_app(state, name)
+        if app is None:
+            raise UserError(f"no hoisted app called {name!r}")
+        holder = app.get("repo") if repo else app
+        if repo and holder is None:
+            raise UserError(f"{name} is not deployed from git")
+        if value:
+            holder[key] = True
+        else:
+            holder.pop(key, None)
+    return app
+
+
+def cmd_pause(args: argparse.Namespace) -> int:
+    _set_flag(args.name, "paused", True, repo=True)
+    ui.ok(f"auto-deploy paused for {args.name} — pushes are ignored until: hoist resume {args.name}")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    _set_flag(args.name, "paused", False, repo=True)
+    ui.ok(f"auto-deploy resumed for {args.name}")
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    app = _set_flag(args.name, "stopped", True)
+    if app.get("adopted"):
+        raise UserError(f"{args.name} was adopted; hoist does not manage its process")
+    service.systemctl("stop", service.unit_name(args.name))
+    ui.ok(f"{args.name} stopped (its URL now answers 502) — start it with: hoist start {args.name}")
+    return 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    app = _set_flag(args.name, "stopped", False)
+    if app.get("adopted"):
+        raise UserError(f"{args.name} was adopted; hoist does not manage its process")
+    service.start(args.name)
+    _report_health(args.name, app["port"])
     return 0
 
 
@@ -533,64 +672,221 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_doctor(args: argparse.Namespace) -> int:
-    problems = 0
+def doctor_checks() -> list[dict]:
+    """Every setup check as data: {level: ok|warn|fail, text, fix: [commands]}.
+
+    `hoist doctor` prints these; the dashboard's System page renders them.
+    """
+    checks: list[dict] = []
+
+    def add(level: str, text: str, fix: list[str] | None = None) -> None:
+        checks.append({"level": level, "text": text, "fix": fix or []})
 
     if service.have_systemd():
-        ui.ok("systemd --user available")
+        add("ok", "systemd --user available")
     else:
-        ui.fail("systemd --user unavailable — hoist cannot manage services")
-        problems += 1
+        add("fail", "systemd --user unavailable — hoist cannot manage services")
 
     if service.lingering_enabled():
-        ui.ok("lingering enabled (services survive logout)")
+        add("ok", "lingering enabled (services survive logout)")
     else:
-        ui.warn("lingering off — services stop when you log out")
-        ui.step(f"fix: sudo loginctl enable-linger {os.environ.get('USER', '$USER')}")
+        add("warn", "lingering off — services stop when you log out",
+            [f"sudo loginctl enable-linger {os.environ.get('USER', '$USER')}"])
 
     if tunnel.have_cloudflared():
-        ui.ok("cloudflared installed")
+        add("ok", "cloudflared installed")
     else:
-        ui.warn("cloudflared not installed — only --local URLs will work")
+        add("warn", "cloudflared not installed — only --local URLs will work")
 
     try:
         cf_path = tunnel.find_config()
         text = cf_path.read_text()
-        ui.ok(f"tunnel config: {cf_path}")
+        add("ok", f"tunnel config: {cf_path}")
         tid = tunnel.tunnel_id(text)
         if tid:
-            ui.ok(f"tunnel id: {tid}")
+            add("ok", f"tunnel id: {tid}")
         else:
-            ui.warn("no `tunnel:` id in config")
+            add("warn", "no `tunnel:` id in config")
         hosts = tunnel.hostnames(text)
-        ui.ok(f"{len(hosts)} ingress hostname(s): {', '.join(hosts) or '—'}")
+        add("ok", f"{len(hosts)} ingress hostname(s): {', '.join(hosts) or '—'}")
         domain = tunnel.default_domain(text)
         if domain:
-            ui.ok(f"default domain: {domain}")
+            add("ok", f"default domain: {domain}")
         else:
-            ui.warn("no domain inferred — pass --domain once")
+            add("warn", "no domain inferred — pass --domain once")
         if tunnel.needs_sudo(cf_path) and not tunnel.sudo_is_passwordless():
-            ui.warn(f"{cf_path} needs root, and sudo will prompt for a password")
-            ui.step("`hoist up` must then run in a real terminal, not a wrapper")
-            ui.step("to remove the prompt for good, run these once:")
             user = os.environ.get("USER") or Path.home().name
-            for line in tunnel.passwordless_setup(cf_path, user):
-                ui.step(f"    {line}")
+            add("warn", f"{cf_path} needs root, and sudo will prompt for a password — "
+                "publishing a new URL must then run in a real terminal",
+                tunnel.passwordless_setup(cf_path, user))
         elif tunnel.needs_sudo(cf_path):
-            ui.ok("sudo available without a password prompt")
+            add("ok", "sudo available without a password prompt")
+        else:
+            add("ok", "tunnel config is writable without sudo")
     except tunnel.TunnelError as exc:
-        ui.warn(str(exc))
+        add("warn", str(exc))
 
     running = tunnel.daemon_unit()
     if running:
         _unit, is_system = running
-        ui.ok(f"cloudflared running as {'system' if is_system else 'user'} unit")
+        add("ok", f"cloudflared running as {'system' if is_system else 'user'} unit")
     else:
-        ui.warn("cloudflared is not running as a service")
+        add("warn", "cloudflared is not running as a service")
 
     state = config.load()
-    ui.ok(f"{len(state['apps'])} app(s) tracked in {config.STATE_FILE}")
+    add("ok", f"{len(state['apps'])} app(s) tracked in {config.STATE_FILE}")
+    return checks
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    problems = 0
+    for check in doctor_checks():
+        {"ok": ui.ok, "warn": ui.warn, "fail": ui.fail}[check["level"]](check["text"])
+        if check["fix"]:
+            if len(check["fix"]) > 1:
+                ui.step("to fix it, run these once:")
+            for line in check["fix"]:
+                ui.step(f"    {line}" if len(check["fix"]) > 1 else f"fix: {line}")
+        problems += check["level"] == "fail"
     return 1 if problems else 0
+
+
+def cmd_limit(args: argparse.Namespace) -> int:
+    import re as _re
+    with config.transaction() as state:
+        app = config.get_app(state, args.name)
+        if app is None:
+            raise UserError(f"no hoisted app called {args.name!r}")
+        if app.get("adopted"):
+            raise UserError(f"{args.name} was adopted; hoist does not manage its process")
+        limits = dict(app.get("limits") or {})
+        for key, value, pattern, example in (("memory", args.memory, service.LIMIT_MEMORY, "512M"),
+                                             ("cpu", args.cpu, service.LIMIT_CPU, "50%")):
+            if value is None:
+                continue
+            value = value.strip().upper()
+            if value in ("", "NONE", "OFF"):
+                limits.pop(key, None)
+            elif not _re.match(pattern, value):
+                raise UserError(f"--{key} expects something like {example}, got {value!r}")
+            else:
+                limits[key] = value
+        if limits:
+            app["limits"] = limits
+        else:
+            app.pop("limits", None)
+        service.write_unit(app)
+    if not app.get("stopped"):
+        service.restart(args.name)
+    shown = ", ".join(f"{k} {v}" for k, v in limits.items()) or "no limits"
+    ui.ok(f"{args.name}: {shown} (restarted)")
+    return 0
+
+
+def cmd_notify(args: argparse.Namespace) -> int:
+    state = config.load()
+    if args.off:
+        state.pop("notify", None)
+        config.save(state)
+        ui.ok("notifications off")
+        return 0
+    if args.url:
+        if not args.url.startswith(("https://", "http://")):
+            raise UserError("expected a webhook URL starting with https://")
+        state["notify"] = {"url": args.url}
+        config.save(state)
+        ui.ok(f"notifications go to a {notify.kind(args.url)} webhook")
+    current = (state.get("notify") or {}).get("url")
+    if not current:
+        ui.info("no webhook set — hoist notify <discord|slack|ntfy|telegram|any URL>")
+        return 0
+    if args.test or args.url:
+        good, detail = notify.send("hoist is connected",
+                                   "You will hear about deploys, failed builds and apps that stop answering.",
+                                   level="ok")
+        (ui.ok if good else ui.fail)(f"test message: {detail}")
+        return 0 if good else 1
+    ui.info(f"notifications go to a {notify.kind(current)} webhook")
+    return 0
+
+
+DASH_PORT = 7457
+DASH_TUNNEL_NAME = "_dashboard"  # slug() can never produce "_", so no app collides
+
+
+def _dash_unit_text(port: int, host: str) -> str:
+    pkg_root = Path(__file__).resolve().parent.parent
+    env = f"Environment=PYTHONPATH={pkg_root}\n"
+    if os.environ.get("HOIST_HOME"):
+        env += f"Environment=HOIST_HOME={os.environ['HOIST_HOME']}\n"
+    return f"""[Unit]
+Description=hoist dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+{env}ExecStart={sys.executable} -m hoist dash --port {port} --host {host} --foreground
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def cmd_dash(args: argparse.Namespace) -> int:
+    from .dash import server
+
+    token = server.load_token(reset=args.reset_token)
+    port = args.port
+
+    if args.service or args.public:
+        unit = service.UNIT_DIR / "hoist--dash.service"
+        service.UNIT_DIR.mkdir(parents=True, exist_ok=True)
+        unit.write_text(_dash_unit_text(port, args.host))
+        service.systemctl("daemon-reload")
+        result = service.systemctl("enable", "--now", "hoist--dash.service")
+        if result.returncode != 0:
+            raise UserError(result.stderr.strip() or "could not start the dashboard service")
+        service.systemctl("restart", "hoist--dash.service")
+        ui.ok(f"dashboard running as a service on 127.0.0.1:{port} (survives reboots)")
+        url = f"http://127.0.0.1:{port}"
+        if args.public:
+            state = config.load()
+            cf_path = tunnel.find_config()
+            cf_text = cf_path.read_text()
+            domain = _resolve_domain(state, None, cf_text)
+            hostname = args.public if "." in args.public else f"{args.public}.{domain}"
+            updated = _apply_ingress(cf_path, cf_text, DASH_TUNNEL_NAME, hostname, port)
+            _publish(updated, hostname)
+            url = f"https://{hostname}"
+        ui.banner(f"{url}/?token={token}", "open this once; the browser remembers you")
+        return 0
+
+    if args.stop:
+        service.systemctl("disable", "--now", "hoist--dash.service")
+        (service.UNIT_DIR / "hoist--dash.service").unlink(missing_ok=True)
+        service.systemctl("daemon-reload")
+        ui.ok("dashboard service stopped and removed")
+        return 0
+
+    if not detect.port_is_free(port):
+        if args.foreground:
+            raise UserError(f"port {port} is already in use")
+        ui.info(f"the dashboard is already running on port {port}")
+        ui.banner(f"http://127.0.0.1:{port}/?token={token}")
+        return 0
+    httpd = server.serve(args.host, port, token)
+    login = f"http://127.0.0.1:{port}/?token={token}"
+    if not args.foreground:
+        ui.banner(login, "Ctrl+C to stop   ·   hoist dash --service keeps it running")
+        if args.open:
+            subprocess.Popen(["xdg-open", login], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 
 # --- argument parsing ---------------------------------------------------------
@@ -646,7 +942,18 @@ def build_parser() -> argparse.ArgumentParser:
     sync = sub.add_parser("sync", help="redeploy a git-backed app if its branch moved")
     sync.add_argument("name")
     sync.add_argument("--force", action="store_true", help="rebuild even if up to date")
+    sync.add_argument("--to", metavar="SHA", help="roll back to this commit (pauses auto-deploy)")
     sync.set_defaults(func=cmd_sync)
+
+    for verb, func, text in (
+        ("pause", cmd_pause, "stop redeploying a repo app on push"),
+        ("resume", cmd_resume, "redeploy a repo app on push again"),
+        ("stop", cmd_stop, "stop an app's process, keeping its config and URL"),
+        ("start", cmd_start, "start a stopped app again"),
+    ):
+        p = sub.add_parser(verb, help=text)
+        p.add_argument("name")
+        p.set_defaults(func=func)
 
     logs = sub.add_parser("logs", help="show an app's logs")
     logs.add_argument("name")
@@ -677,6 +984,29 @@ def build_parser() -> argparse.ArgumentParser:
     add_qr_flags(adopt)
     adopt.set_defaults(func=cmd_adopt)
 
+    lim = sub.add_parser("limit", help="cap an app's memory or CPU")
+    lim.add_argument("name")
+    lim.add_argument("--memory", help="e.g. 512M or 2G; 'off' removes it")
+    lim.add_argument("--cpu", help="e.g. 50%% of one core, 200%% for two; 'off' removes it")
+    lim.set_defaults(func=cmd_limit)
+
+    note = sub.add_parser("notify", help="send deploy and downtime alerts to a webhook")
+    note.add_argument("url", nargs="?", help="Discord, Slack, ntfy, Telegram or any webhook URL")
+    note.add_argument("--test", action="store_true", help="send a test message")
+    note.add_argument("--off", action="store_true", help="stop sending notifications")
+    note.set_defaults(func=cmd_notify)
+
+    dash = sub.add_parser("dash", help="open the web dashboard")
+    dash.add_argument("--port", type=int, default=DASH_PORT)
+    dash.add_argument("--host", default="127.0.0.1", help="interface to bind (default 127.0.0.1)")
+    dash.add_argument("--open", action="store_true", help="open it in the browser")
+    dash.add_argument("--service", action="store_true", help="keep it running as a user service")
+    dash.add_argument("--public", metavar="NAME", help="also publish it, e.g. --public dash")
+    dash.add_argument("--stop", action="store_true", help="stop and remove the dashboard service")
+    dash.add_argument("--reset-token", action="store_true", help="sign every browser out")
+    dash.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
+    dash.set_defaults(func=cmd_dash)
+
     doctor = sub.add_parser("doctor", help="check the local setup")
     doctor.set_defaults(func=cmd_doctor)
 
@@ -691,7 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
         ui.fail(str(exc))
         return 1
     except (tunnel.TunnelError, service.ServiceError, detect.DetectionError,
-            source.SourceError) as exc:
+            source.SourceError, config.StateError) as exc:
         ui.fail(str(exc))
         return 1
     except KeyboardInterrupt:
