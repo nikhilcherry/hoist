@@ -326,6 +326,17 @@ def run_build(directory: Path, steps: list[str], log=print,
     return True, ""
 
 
+def remote_branches(dest: Path) -> dict[str, str]:
+    """{branch: sha} for every branch on origin."""
+    out = _git("ls-remote", "--heads", "origin", cwd=dest, timeout=60)
+    heads = {}
+    for line in out.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.startswith("refs/heads/"):
+            heads[ref[len("refs/heads/"):]] = sha
+    return heads
+
+
 def fetch_sha(dest: Path, sha: str) -> str:
     """Make one specific commit available in the shallow checkout (rollback)."""
     _git("fetch", "--depth", "1", "origin", sha, cwd=dest, timeout=120)

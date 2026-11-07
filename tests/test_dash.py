@@ -137,3 +137,17 @@ def test_qr_endpoint_returns_svg(dash):
     port, token = dash
     status, headers, body = call(port, "GET", "/api/qr.svg?text=https://x.example", headers=auth(token))
     assert status == 200 and headers["Content-Type"] == "image/svg+xml" and body.startswith(b"<svg")
+
+
+def test_a_member_can_act_but_cannot_manage_people(dash):
+    from hoist.dash import team
+    port, _ = dash
+    member = team.add("shreyas")
+    status, _, body = call(port, "GET", "/api/state", headers=auth(member))
+    assert status == 200 and json.loads(body)["me"] == "shreyas"
+    status, _, _ = call(port, "POST", "/api/team", {"name": "intruder"},
+                        headers={**auth(member), "X-Hoist": "1"})
+    assert status == 403
+    call(port, "POST", "/api/apps/web/env", {"env": {"A": "1"}, "restart": False},
+         headers={**auth(member), "X-Hoist": "1"})
+    assert team.audit_tail()[0]["user"] == "shreyas"

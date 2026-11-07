@@ -25,11 +25,12 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent.parent
 class Job:
     _ids = itertools.count(1)
 
-    def __init__(self, title: str, args: list[str], app: str | None) -> None:
+    def __init__(self, title: str, args: list[str], app: str | None, actor: str | None = None) -> None:
         self.id = f"j{next(self._ids)}"
         self.title = title
         self.args = args
         self.app = app
+        self.actor = actor
         self.lines: list[str] = []
         self.status = "running"
         self.code: int | None = None
@@ -39,7 +40,7 @@ class Job:
 
     def as_dict(self, with_lines: bool = False) -> dict:
         data = {
-            "id": self.id, "title": self.title, "app": self.app,
+            "id": self.id, "title": self.title, "app": self.app, "actor": self.actor,
             "command": "hoist " + " ".join(self.args),
             "status": self.status, "code": self.code,
             "started": self.started, "ended": self.ended,
@@ -62,8 +63,9 @@ class Jobs:
                     return job
         return None
 
-    def start(self, title: str, args: list[str], app: str | None = None) -> Job:
-        job = Job(title, args, app)
+    def start(self, title: str, args: list[str], app: str | None = None,
+              actor: str | None = None) -> Job:
+        job = Job(title, args, app, actor)
         with self.lock:
             self.jobs[job.id] = job
             while len(self.jobs) > KEEP_JOBS:
@@ -85,7 +87,7 @@ class Jobs:
             job.changed.notify_all()
 
     def _run(self, job: Job) -> None:
-        env = dict(os.environ, NO_COLOR="1", PYTHONUNBUFFERED="1",
+        env = dict(os.environ, NO_COLOR="1", PYTHONUNBUFFERED="1", HOIST_ACTOR=job.actor or "",
                    PYTHONPATH=str(_PKG_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""))
         try:
             proc = subprocess.Popen(

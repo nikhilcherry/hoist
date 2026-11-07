@@ -13,7 +13,7 @@ VIEWS.overview = () => ({
     head() {
       const s = store.state;
       if (!s) return `<div class="title-row"><div class="titles"><h1>Overview</h1><div class="skeleton" style="width:340px;margin-top:10px"></div></div></div>`;
-      const apps = s.apps, broken = apps.filter(isBroken);
+      const apps = s.apps.filter((a) => a.kind !== "db"), broken = s.apps.filter(isBroken);
       const lastDeploy = (store.deployments || []).find((d) => d.status !== "failed");
       let finding;
       if (!apps.length) finding = `Nothing is hoisted on <strong>${esc(s.host)}</strong> yet. Deploy a repo and every push to it goes live here.`;
@@ -41,10 +41,12 @@ VIEWS.overview = () => ({
     },
     apps() {
       const s = store.state; if (!s) return `<div class="card"><div class="card-body"><div class="skeleton" style="height:120px"></div></div></div>`;
-      if (!s.apps.length) return emptyApps();
+      const apps = s.apps.filter((a) => a.kind !== "db"), dbs = s.apps.filter((a) => a.kind === "db");
+      if (!apps.length && !dbs.length) return emptyApps();
       return `<div class="card">
         <div class="card-head"><h2>Apps</h2><div class="right">Public URLs are checked every 30 s</div></div>
-        <div class="card-body flush">${appsTable(s.apps, { compact: true })}</div></div>`;
+        <div class="card-body flush">${apps.length ? appsTable(apps, { compact: true }) : '<div class="empty">No apps yet.</div>'}</div></div>
+        ${dbs.length ? `<div class="card" style="margin-top:var(--gap)"><div class="card-head"><h2>Databases</h2><div class="right"><a href="/databases" data-link>Manage</a></div></div><div class="card-body flush">${dbTable(dbs)}</div></div>` : ""}`;
     },
     machine() {
       const s = store.state; if (!s) return "";
@@ -147,7 +149,7 @@ VIEWS.apps = () => {
     },
     parts: {
       tabs() {
-        const apps = store.state?.apps || [];
+        const apps = (store.state?.apps || []).filter((a) => a.kind !== "db");
         const n = { all: apps.length, broken: apps.filter(isBroken).length, git: apps.filter((a) => a.repo).length, stopped: apps.filter((a) => a.status === "stopped").length };
         const tab = (k, label) => `<a href="#" data-tab="${k}" aria-selected="${which === k}">${label} <span class="count">${n[k]}</span></a>`;
         return `<div class="tabs" role="tablist">${tab("all", "All")}${tab("broken", "Not answering")}${tab("git", "From git")}${tab("stopped", "Stopped")}</div>`;
@@ -163,7 +165,7 @@ VIEWS.apps = () => {
     },
   };
   function rows() {
-    return (store.state?.apps || []).filter((a) =>
+    return (store.state?.apps || []).filter((a) => a.kind !== "db").filter((a) =>
       (which === "all" || (which === "broken" && isBroken(a)) || (which === "git" && a.repo) || (which === "stopped" && a.status === "stopped")) &&
       (!filter || [a.name, a.hostname, a.url, a.repo?.branch, a.repo?.url].some((v) => String(v || "").toLowerCase().includes(filter))));
   }
@@ -176,7 +178,7 @@ VIEWS.app = (name, tab = "overview") => {
   const d = () => store.detail[name];
   const a = () => d()?.row || appByName(name);
   const base = `/apps/${name}`;
-  const TABS = [["overview", "Overview"], ["deployments", "Deployments"], ["logs", "Logs"], ["environment", "Environment"], ["settings", "Settings"]];
+  const TABS = [["overview", "Overview"], ["deployments", "Deployments"], ["logs", "Logs"], ["console", "Console"], ["environment", "Environment"], ["settings", "Settings"]];
   const v = {
     title: name,
     crumbs: [["Apps", "/apps"], [name, base]],
@@ -194,15 +196,16 @@ VIEWS.app = (name, tab = "overview") => {
           <div class="titles">
             <h1>${esc(name)} ${statusPill(app.status)}${app.repo?.paused ? '<span class="pill paused">Auto-deploy paused</span>' : ""}${busy ? `<span class="pill building"><span class="d"></span>${esc(busy.title)}</span>` : ""}</h1>
             <div class="subline">
-              <a href="${esc(app.url)}" target="_blank" rel="noopener">${esc(app.public ? app.hostname : app.url)} ${ic("ext", 13, 'style="vertical-align:-2px"')}</a>
-              <button class="btn ghost icon sm" data-action="copy" data-text="${esc(app.url)}" aria-label="Copy URL" title="Copy URL">${ic("copy", 14)}</button>
+              ${app.kind === "db" ? `<span>${ic("db", 14, 'style="vertical-align:-2px"')} ${esc(ENGINE_LABEL[app.db?.engine] || "")} · ${esc(app.db?.image || "")}</span>` : `<a href="${esc(app.url)}" target="_blank" rel="noopener">${esc(app.public ? app.hostname : app.url)} ${ic("ext", 13, 'style="vertical-align:-2px"')}</a>
+              <button class="btn ghost icon sm" data-action="copy" data-text="${esc(app.url)}" aria-label="Copy URL" title="Copy URL">${ic("copy", 14)}</button>`}
+              ${app.preview_of ? `<span>Preview of <a href="/apps/${esc(app.preview_of)}" data-link>${esc(app.preview_of)}</a></span>` : ""}
               ${app.repo ? `<span>${ic("git", 14, 'style="vertical-align:-2px"')} ${esc(fmt.repo(app.repo.url))} · ${esc(app.repo.branch)}</span>` : ""}
               <span class="mono" style="font-size:12px">:${app.port}</span>
             </div>
             ${why ? `<p class="finding bad"><strong>${esc(why.charAt(0).toUpperCase() + why.slice(1))}.</strong></p>` : ""}
           </div>
           <div class="actions">
-            <button class="btn" data-action="qr" data-app="${name}">${ic("qr")}QR</button>
+            ${app.kind === "db" ? "" : `<button class="btn" data-action="qr" data-app="${name}">${ic("qr")}QR</button>`}
             ${app.adopted ? "" : `<a class="btn" href="${base}/logs" data-link>${ic("terminal")}Logs</a>`}
             ${primary}
             <button class="btn icon" data-action="app-menu" data-app="${name}" aria-label="More actions">${ic("more")}</button>
@@ -211,12 +214,12 @@ VIEWS.app = (name, tab = "overview") => {
       },
       tabs() {
         const app = a(); const hist = d()?.history?.length;
-        return `<div class="tabs" role="tablist">${TABS.filter(([k]) => !(app?.adopted && ["logs", "environment"].includes(k))).map(([k, label]) =>
+        return `<div class="tabs" role="tablist">${TABS.filter(([k]) => !(app?.adopted && ["logs", "console", "environment"].includes(k)) && !(k === "console" && store.state?.me !== "owner") && !(app?.kind === "db" && ["deployments", "environment"].includes(k))).map(([k, label]) =>
           `<a href="${k === "overview" ? base : `${base}/${k}`}" data-link role="tab" aria-selected="${tab === k}">${label}${k === "deployments" && hist ? ` <span class="count">${hist}</span>` : ""}${k === "environment" && app?.env_keys?.length ? ` <span class="count">${app.env_keys.length}</span>` : ""}</a>`).join("")}</div>`;
       },
     },
   };
-  const tabViews = { overview: appOverview, deployments: appDeployments, logs: appLogs, environment: appEnv, settings: appSettings };
+  const tabViews = { overview: appOverview, deployments: appDeployments, logs: appLogs, console: appConsole, environment: appEnv, settings: appSettings };
   const sub = tabViews[tab](name, a, d, v);
   Object.assign(v.parts, sub.parts || {});
   function tabLayout() { return sub.layout(); }
@@ -228,16 +231,25 @@ VIEWS.app = (name, tab = "overview") => {
 
 function appOverview(name, a, d) {
   return {
-    layout: () => `${part("route")}${part("live")}${part("kpis")}<div class="grid-3-1">${part("charts", "card")}${part("qr", "card")}</div>${part("recent")}`,
+    layout: () => `${part("route")}${part("live")}${part("previews")}${part("kpis")}<div class="grid-3-1">${part("charts", "card")}${part("qr", "card")}</div>${part("recent")}`,
     parts: {
-      route() { const app = a(); return app ? routeStrip(app) : ""; },
+      route() { const app = a(); return !app ? "" : app.kind === "db" ? dbConnectCard(app) : routeStrip(app); },
+      previews() {
+        const app = a(); if (!app?.repo || app.preview_of) return "";
+        const kids = (store.state?.apps || []).filter((x) => x.preview_of === name);
+        const failed = Object.entries(app.repo.preview_failed || {});
+        if (!app.repo.previews && !kids.length) return "";
+        return `<div class="card"><div class="card-head"><h2>Branch previews</h2><div class="right">${app.repo.previews ? "Every branch gets its own app, removed when the branch is deleted" : "Off — existing previews stay until taken down"}</div></div>
+          <div class="card-body flush">${kids.length ? appsTable(kids, { compact: true }) : `<div class="empty" style="padding:24px 16px">Push a branch other than ${esc(app.repo.branch)} and its preview appears here within a minute.</div>`}
+          ${failed.length ? `<div style="padding:10px 16px;border-top:1px solid var(--rule);color:var(--negative)">${failed.map(([b, sha]) => `${esc(b)} <span class="sha">${fmt.sha(sha)}</span> failed to build — push a fix to retry`).join("<br>")}</div>` : ""}</div></div>`;
+      },
       live() {
         const app = a(); if (!app?.repo) return "";
         const last = app.repo.last || {};
         return `<div class="live-card">
           <div><div class="k">Live deployment</div><div class="commit" style="margin-top:4px">${esc(fmt.message(app.repo.commit) || "—")}</div>
             <div class="meta"><span class="mono" style="font-size:12px">${fmt.sha(app.repo.sha)}</span><span>${esc(fmt.author(app.repo.commit) || "")}</span><span>${ic("git", 13, 'style="vertical-align:-2px"')} ${esc(app.repo.branch)}</span></div></div>
-          <div><div class="k">Deployed</div><div class="v" title="${esc(fmt.when(app.repo.deployed))}">${fmt.ago(app.repo.deployed)}</div><div class="k" style="margin-top:2px">${esc(last.trigger ? { push: "by a push", manual: "by hand", rollback: "as a rollback", initial: "first deploy" }[last.trigger] || last.trigger : "")}</div></div>
+          <div><div class="k">Deployed</div><div class="v" title="${esc(fmt.when(app.repo.deployed))}">${fmt.ago(app.repo.deployed)}</div><div class="k" style="margin-top:2px">${esc(last.trigger ? ({ push: "by a push", manual: "redeployed", rollback: "as a rollback", initial: "first deploy" }[last.trigger] || last.trigger) + (last.by ? ` by ${last.by}` : "") : "")}</div></div>
           <div><div class="k">Build time</div><div class="v num">${last.seconds != null ? fmt.dur(last.seconds) : "—"}</div><div class="k" style="margin-top:2px">${app.repo.build?.length ? fmt.plural(app.repo.build.length, "step") : "no build step"}</div></div>
           <div><div class="k">Auto-deploy</div><div class="v">${app.repo.paused ? '<span style="color:var(--warning)">Paused</span>' : app.repo.watching ? "On every push" : '<span style="color:var(--negative)">Watcher stopped</span>'}</div><div class="k" style="margin-top:2px">${app.repo.paused ? "pushes are ignored" : "checks every 20 s"}</div></div>
           <div><div class="k">Running since</div><div class="v">${app.since ? fmt.ago(app.since).replace(" ago", "") : "—"}</div><div class="k" style="margin-top:2px">${app.restarts ? `${fmt.plural(app.restarts, "crash restart")}` : "no crash restarts"}</div></div>
@@ -249,11 +261,17 @@ function appOverview(name, a, d) {
         const ms = probes.filter((p) => p.ms != null).map((p) => p.ms).sort((x, y) => x - y);
         const p50 = ms.length ? ms[Math.floor(ms.length / 2)] : null;
         const fails = probes.filter((p) => !p.up).length;
+        if (app.kind === "db") return `<div class="kpis">
+          ${kpi("Listening on", `<span style="font-size:20px" class="mono">:${app.port}</span>`, "this machine only")}
+          ${kpi("CPU", app.cpu == null ? "—" : fmt.pct(app.cpu), "the database container")}
+          ${kpi("Memory", app.memory == null ? "—" : fmt.bytes(app.memory), app.limits?.memory ? `capped at ${esc(app.limits.memory)}` : "no limit set")}
+          ${kpi("Running since", app.since ? fmt.ago(app.since).replace(" ago", "") : "—", app.restarts ? fmt.plural(app.restarts, "crash restart") : "no crash restarts")}
+        </div>`;
         return `<div class="kpis">
-          ${app.public ? kpi("Public check", app.probe ? (app.probe.code ? `${app.probe.code}` : "—") : "—", app.probe ? (app.probe.up ? `${app.probe.ms} ms just now` : esc(app.probe.error || `answered ${app.probe.code}`)) : "first check within 30 s", app.probe && !app.probe.up) : kpi("Reachable at", `<span style="font-size:20px">LAN</span>`, esc(fmt.host(app.url)))}
+          ${app.kind === "db" ? kpi("Listening on", `<span style="font-size:20px" class="mono">:${app.port}</span>`, "this machine only") : app.public ? kpi("Public check", app.probe ? (app.probe.code ? `${app.probe.code}` : "—") : "—", app.probe ? (app.probe.up ? `${app.probe.ms} ms just now` : esc(app.probe.error || `answered ${app.probe.code}`)) : "first check within 30 s", app.probe && !app.probe.up) : kpi("Reachable at", `<span style="font-size:20px">LAN</span>`, esc(fmt.host(app.url)))}
           ${kpi("Uptime, last hour", app.uptime == null ? "—" : fmt.pct(app.uptime, app.uptime === 100 ? 0 : 1), probes.length ? `${fmt.plural(fails, "failed check")} of ${probes.length}` : "no checks yet", app.uptime != null && app.uptime < 99, fails ? "bad" : "")}
           ${kpi("Median response", p50 == null ? "—" : fmt.ms(p50), ms.length ? `slowest ${ms[ms.length - 1]} ms` : "public URLs only")}
-          ${kpi("CPU", app.cpu == null ? "—" : fmt.pct(app.cpu), app.pid ? `PID ${app.pid}` : app.adopted ? "not managed by hoist" : "not running")}
+          ${kpi("CPU", app.cpu == null ? "—" : fmt.pct(app.cpu), app.kind === "compose" ? `${fmt.plural(app.containers || 0, "container")}` : app.pid ? `PID ${app.pid}` : app.adopted ? "not managed by hoist" : "not running")}
           ${kpi("Memory", app.memory == null ? "—" : fmt.bytes(app.memory), app.memory == null ? "" : `of ${fmt.bytesText(store.state?.system.mem_total)} on this machine`)}
         </div>`;
       },
@@ -270,6 +288,14 @@ function appOverview(name, a, d) {
       },
       qr() {
         const app = a(); if (!app) return "";
+        if (app.kind === "db") {
+          const b = d()?.backups; const list = b?.backups || [];
+          return `<div class="card-head"><h2>Backups</h2><div class="right"><button class="switch" role="switch" aria-checked="${!!b?.daily}" data-action="backup-schedule" data-on="${b?.daily ? "0" : "1"}" data-app="${name}" aria-label="Daily backups"></button>Daily</div></div>
+            <div class="card-body flush">${list.length ? `<div class="feed">${list.slice(0, 5).map((x) => `<div class="feed-item" style="grid-template-columns:minmax(0,1fr) auto"><div class="what"><div class="mono" style="font-size:12.5px">${esc(x.file)}</div><div class="muted" style="font-size:12px">${fmt.bytesText(x.size)} · ${fmt.ago(x.at)}</div></div>
+              <div class="actions" style="flex-wrap:nowrap"><a class="btn ghost icon sm" href="/api/apps/${name}/backups/${esc(x.file)}" download title="Download" aria-label="Download ${esc(x.file)}">${ic("download", 14)}</a><button class="btn ghost sm" data-action="restore" data-app="${name}" data-file="${esc(x.file)}">${ic("undo", 14)}Restore</button></div></div>`).join("")}</div>`
+              : `<div class="empty" style="padding:20px 16px">No backups yet. Data lives in the volume <span class="mono">${esc(app.db?.volume)}</span>.</div>`}
+              <div style="padding:12px 16px;border-top:1px solid var(--rule)"><button class="btn sm" data-action="backup" data-app="${name}">${ic("download", 14)}Back up now</button> <span class="muted" style="font-size:12px;margin-left:8px">The newest 10 are kept${app.db?.offsite ? ` · also copied to ${esc(app.db.offsite)}` : " · <span class=\"mono\">hoist backup " + esc(name) + " --offsite gdrive:hoist</span> copies them off this machine"}</span></div></div>`;
+        }
         return `<div class="card-head"><h2>Open on a phone</h2></div>
           <div class="qr-card"><img src="/api/qr.svg?text=${encodeURIComponent(app.url)}" alt="QR code for ${esc(app.url)}" width="132" height="132">
           <div><div class="url">${esc(app.public ? app.hostname : fmt.host(app.url))}</div><p class="muted" style="margin:6px 0 12px">Point a judge's camera at it.${app.public ? "" : " Works on the same Wi-Fi only."}</p>
@@ -293,6 +319,7 @@ function routeStrip(app) {
   // 1. source
   hops.push(r
     ? hop(r.paused ? "warn" : r.watching ? "" : "bad", "git", "Source", `${esc(r.branch)} @ ${fmt.sha(r.sha)}`, r.paused ? "auto-deploy paused" : r.watching ? `${esc(fmt.repo(r.url))}` : "watcher is not running", true)
+    : app.template ? hop("", "box", "Source", `Ready-made · ${esc(app.template)}`, "Docker image")
     : app.adopted ? hop("off", "plug", "Source", "Existing process", "started outside hoist")
     : hop("", "folder", "Source", esc((app.workdir || "").split("/").pop()), esc(app.workdir || "")));
   // 2. build
@@ -303,6 +330,7 @@ function routeStrip(app) {
   // 3. process
   const procCls = { up: "", starting: "warn", stopped: "off", failed: "bad", down: "bad" }[app.status] ?? "bad";
   hops.push(app.adopted ? hop(app.status === "up" ? "" : "bad", "box", "Process", "Not managed", app.status === "up" ? "answering" : "not answering")
+    : app.kind === "compose" && app.status === "up" ? hop("", "box", "Containers", `${fmt.plural(app.containers || 0, "container")}`, `docker compose · ${app.memory != null ? fmt.bytesText(app.memory) : ""}`)
     : hop(procCls, "box", "Process", app.pid ? `PID ${app.pid}` : STATUS_WORDS[app.status] || app.status,
       app.status === "up" ? `up ${fmt.dur(app.since ? Date.now() / 1000 - app.since : null)}${app.memory != null ? ` · ${fmt.bytesText(app.memory)}` : ""}` : esc(diagnose(app) || "not running")));
   // 4. port
@@ -327,7 +355,7 @@ function deployTable(name, hist, app) {
       return `<tr>
         <td class="nowrap"><span class="dep-status"><span class="ring ${failed ? "bad" : ""} ${live ? "live" : ""}"></span>${failed ? '<span style="color:var(--negative)">Failed</span>' : live ? "<strong>Live</strong>" : h.status === "unhealthy" ? '<span style="color:var(--warning)">Unhealthy</span>' : '<span class="muted">Ready</span>'}</span></td>
         <td><div class="nowrap"><span class="sha">${fmt.sha(h.sha)}</span> ${esc(fmt.message(h.commit))}</div><div class="sub">${esc(fmt.author(h.commit))}${failed && h.error ? ` · <span style="color:var(--negative)">${esc(h.error)}</span>` : ""}</div></td>
-        <td class="hide-sm">${esc(TRIG[h.trigger] || h.trigger || "—")}</td>
+        <td class="hide-sm">${esc(TRIG[h.trigger] || h.trigger || "—")}${h.by ? `<div class="sub">by ${esc(h.by)}</div>` : ""}</td>
         <td class="r hide-sm">${h.seconds != null ? fmt.dur(h.seconds) : "—"}</td>
         <td class="r"><span title="${esc(fmt.when(h.at))}">${fmt.ago(h.at)}</span></td>
         <td class="r nowrap">${h.log?.length ? `<button class="btn ghost sm" data-action="deploy-log" data-app="${name}" data-at="${esc(h.at)}">${ic("terminal", 14)}Log</button>` : ""}${!live && !failed && h.sha !== app?.repo?.sha ? `<button class="btn ghost sm" data-action="rollback" data-app="${name}" data-sha="${esc(h.sha)}" data-msg="${esc(fmt.message(h.commit))}">${ic("undo", 14)}Roll back</button>` : ""}</td>
@@ -430,6 +458,47 @@ function appLogs(name, a) {
   };
 }
 
+function appConsole(name, a) {
+  const history = [];
+  let hIdx = -1;
+  const examples = () => {
+    const app = a();
+    if (app?.kind === "db") return { postgres: "psql -U hoist -c '\\dt'", mysql: "mysql -u hoist -p$MYSQL_PASSWORD -e 'show tables'", mariadb: "mariadb -u hoist -p$MARIADB_PASSWORD -e 'show tables'", redis: "redis-cli --no-auth-warning -a $(cat /proc/1/cmdline | tr '\\0' ' ' | sed 's/.*requirepass //;s/ .*//') dbsize", mongo: "mongosh --quiet --eval 'db.stats()'" }[app.db?.engine] || "ls";
+    if (app?.kind === "compose") return "ls && env | sort | head -20";
+    return app?.repo ? "ls && git log -1 2>/dev/null || true" : "ls";
+  };
+  return {
+    parts: {
+      cnote() {
+        const app = a(); if (!app) return "";
+        return `<div class="notice info"><span>${ic("terminal")}</span><div class="grow">Runs one command ${app.kind === "db" ? "inside the database container" : app.kind === "compose" ? "inside the stack's web service" : "in the app's folder with its environment variables"} and streams the output. Good for migrations, seeding and quick checks. Each command is written to the audit log.</div></div>`;
+      },
+    },
+    layout: () => `${part("cnote")}
+      <form class="card" id="console-form"><div class="card-body" style="display:flex;gap:8px;align-items:center">
+        <span class="mono" style="color:var(--muted)">$</span>
+        <input class="input mono" id="console-cmd" placeholder="${esc(examples())}" autocomplete="off" spellcheck="false" autofocus aria-label="Command">
+        <button class="btn primary" type="submit">${ic("play", 14)}Run</button></div></form>
+      <div class="term" id="console-out" style="height:calc(100vh - 420px);min-height:280px"><div class="dim">Output appears here.</div></div>`,
+    mount() {
+      const input = $("#console-cmd"), out = $("#console-out");
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowUp" && history.length) { hIdx = Math.min(hIdx + 1, history.length - 1); input.value = history[history.length - 1 - hIdx]; e.preventDefault(); }
+        if (e.key === "ArrowDown") { hIdx = Math.max(hIdx - 1, -1); input.value = hIdx < 0 ? "" : history[history.length - 1 - hIdx]; e.preventDefault(); }
+      });
+      $("#console-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const command = input.value.trim() || examples(); history.push(command); hIdx = -1;
+        const btn = $("#console-form button"); btn.disabled = true;
+        try {
+          const r = await post(`/api/apps/${name}/exec`, { command });
+          streamJob(r.job, out, (j) => { btn.disabled = false; out.insertAdjacentHTML("beforeend", `<div class="${j.code === 0 ? "dim" : "bad"}">exit ${j.code} · ${fmt.dur(j.ended - j.started)}</div>`); input.select(); });
+        } catch (err) { btn.disabled = false; toast(err.message, true); }
+      });
+    },
+  };
+}
+
 function parseDotenv(text) {
   const out = {};
   for (let line of text.split(/\r?\n/)) {
@@ -522,7 +591,7 @@ function appEnv(name, a, d) {
 
 function appSettings(name, a) {
   return {
-    layout: () => `${part("info", "card")}${a()?.adopted ? "" : limitsCard(name, a())}${part("deploy", "card")}${part("danger", "card")}`,
+    layout: () => `${part("info", "card")}${a()?.adopted || a()?.kind === "compose" ? "" : limitsCard(name, a())}${part("deploy", "card")}${part("danger", "card")}`,
     mount() {
       const f = $("#limits-form"); if (!f) return;
       f.addEventListener("submit", async (e) => {
@@ -555,6 +624,7 @@ function appSettings(name, a) {
           <div class="dt">Branch</div><div class="dd">${esc(r.branch)}</div>
           <div class="dt">Build steps</div><div class="dd">${r.build?.length ? r.build.map((s) => `<div><code>${esc(s)}</code></div>`).join("") : '<span class="muted">none</span>'}</div>
           <div class="dt">Auto-deploy</div><div class="dd" style="display:flex;align-items:center;gap:12px"><button class="switch" role="switch" aria-checked="${!r.paused}" data-action="${r.paused ? "resume" : "pause"}" data-app="${name}" aria-label="Auto-deploy"></button><span>${r.paused ? "Paused — pushes are ignored" : "On — checks every 20 seconds"}</span></div>
+          ${app.preview_of ? "" : `<div class="dt">Branch previews</div><div class="dd" style="display:flex;align-items:center;gap:12px"><button class="switch" role="switch" aria-checked="${!!r.previews}" data-action="previews" data-on="${r.previews ? "0" : "1"}" data-app="${name}" aria-label="Branch previews"></button><span>${r.previews ? "On — every branch gets its own app (up to 5)" : "Off"}</span></div>`}
         </div>`;
       },
       danger() {
@@ -562,7 +632,7 @@ function appSettings(name, a) {
         return `<div class="card-head"><h2>Process</h2></div>
           <div class="dl">
             ${app.adopted ? "" : `<div class="dt">${app.status === "stopped" ? "Start" : "Stop"}</div><div class="dd" style="display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap"><span class="muted">${app.status === "stopped" ? "Start the process again on the same port and URL." : "Stop the process but keep its URL, config and history. The URL answers 502 until you start it."}</span>${app.status === "stopped" ? `<button class="btn" data-action="start" data-app="${name}">${ic("play")}Start</button>` : `<button class="btn" data-action="stop" data-app="${name}">${ic("stop")}Stop</button>`}</div>`}
-            <div class="dt">Take down</div><div class="dd" style="display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap"><span class="muted">Stops ${esc(name)}, removes its tunnel route${app.repo ? ", its watcher and its checkout" : ""}. The DNS record stays.</span><button class="btn danger" data-action="delete" data-app="${name}">${ic("trash")}Take down</button></div>
+            <div class="dt">Take down</div><div class="dd" style="display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap"><span class="muted">${app.kind === "db" ? `Stops ${esc(name)} and removes its container. You choose whether its data goes too.` : `Stops ${esc(name)}, removes its tunnel route${app.repo ? ", its watcher and its checkout" : ""}. The DNS record stays.`}</span><button class="btn danger" data-action="delete" data-app="${name}">${ic("trash")}Take down</button></div>
           </div>`;
       },
     },
@@ -608,7 +678,7 @@ VIEWS.deployments = () => {
           ${rows.map((x) => `<tr class="click" data-href="/apps/${x.app}/deployments"><td class="name">${esc(x.app)}</td>
             <td class="nowrap"><span class="dep-status"><span class="ring ${x.status === "failed" ? "bad" : ""} ${x.live ? "live" : ""}"></span>${x.status === "failed" ? '<span style="color:var(--negative)">Failed</span>' : x.live ? "<strong>Live</strong>" : '<span class="muted">Ready</span>'}</span></td>
             <td><div class="nowrap"><span class="sha">${fmt.sha(x.sha)}</span> ${esc(fmt.message(x.commit))}</div><div class="sub">${esc(fmt.author(x.commit))}${x.error ? ` · <span style="color:var(--negative)">${esc(x.error)}</span>` : ""}</div></td>
-            <td class="hide-sm">${esc(TRIG[x.trigger] || x.trigger)}</td><td class="r hide-sm">${x.seconds != null ? fmt.dur(x.seconds) : "—"}</td><td class="r"><span title="${esc(fmt.when(x.at))}">${fmt.ago(x.at)}</span></td></tr>`).join("")}
+            <td class="hide-sm">${esc(TRIG[x.trigger] || x.trigger)}${x.by ? `<div class="sub">by ${esc(x.by)}</div>` : ""}</td><td class="r hide-sm">${x.seconds != null ? fmt.dur(x.seconds) : "—"}</td><td class="r"><span title="${esc(fmt.when(x.at))}">${fmt.ago(x.at)}</span></td></tr>`).join("")}
           </tbody></table></div></div>`;
       },
     },
@@ -649,7 +719,7 @@ VIEWS.routes = () => ({
 VIEWS.machine = () => ({
   title: "Machine",
   crumbs: [["Machine", "/machine"]],
-  layout: () => `${part("head")}${part("kpis")}<div class="grid-1-1">${part("cpu", "card")}${part("mem", "card")}</div><div class="grid-3-1" style="align-items:start"><div style="display:flex;flex-direction:column;gap:var(--gap)">${part("checks", "card")}${part("hogs")}</div><div style="display:flex;flex-direction:column;gap:var(--gap)">${notifyCard()}${part("access", "card")}</div></div>`,
+  layout: () => `${part("head")}${part("kpis")}<div class="grid-1-1">${part("cpu", "card")}${part("mem", "card")}</div>${part("net", "card")}<div class="grid-3-1" style="align-items:start"><div style="display:flex;flex-direction:column;gap:var(--gap)">${part("checks", "card")}${part("hogs")}</div><div style="display:flex;flex-direction:column;gap:var(--gap)">${notifyCard()}${part("access", "card")}</div></div>`,
   mount() {
     api("/api/doctor").then((r) => { store.doctor = r.checks; renderPart("checks", true); }).catch(() => {});
     mountNotify();
@@ -677,6 +747,16 @@ VIEWS.machine = () => ({
     mem() {
       const pts = store.metrics?.system || []; const total = store.state?.system.mem_total || 1;
       return `<div class="card-head"><h2>Memory</h2><div class="right">of ${fmt.bytesText(total)}</div></div><div class="card-body">${chart({ height: 160, yMax: total, yFmt: (v) => fmt.bytesText(v), label: "Memory", series: [{ label: "Used", color: css("--chart-2"), area: true, fmt: (v) => fmt.bytesText(v), points: pts.map((p) => [p[0], p[2]]) }] })}</div>`;
+    },
+    net() {
+      const pts = store.metrics?.system || []; const s = store.state?.system;
+      const rate = (v) => v == null ? "—" : `${fmt.bytesText(v)}/s`;
+      return `<div class="card-head"><h2>Network</h2><div class="right legend"><span><i style="background:var(--chart-1)"></i>In ${rate(s?.net_rx)}</span><span><i style="background:var(--chart-2)"></i>Out ${rate(s?.net_tx)}</span></div></div>
+        <div class="card-body">${chart({ height: 130, label: "Network", yFmt: (v) => `${fmt.bytesText(v)}/s`, empty: "Collecting — rates appear after the first few seconds.",
+          series: [
+            { label: "In", color: css("--chart-1"), area: true, fmt: rate, points: pts.filter((p) => p.length > 3).map((p) => [p[0], p[3]]) },
+            { label: "Out", color: css("--chart-2"), fmt: rate, points: pts.filter((p) => p.length > 3).map((p) => [p[0], p[4]]) },
+          ] })}</div>`;
     },
     checks() {
       const c = store.doctor;
@@ -724,6 +804,102 @@ function mountNotify() {
     finally { e.currentTarget.disabled = false; }
   });
 }
+
+function dbTable(dbs) {
+  return `<div class="table-wrap"><table class="t stack apps-t"><thead><tr><th>Database</th><th>Status</th><th class="hide-sm">Engine</th><th class="r">Address</th><th class="r hide-sm">Memory</th><th></th></tr></thead><tbody>
+    ${dbs.map((a) => `<tr class="click" data-href="/apps/${a.name}"><td><div class="name">${esc(a.name)}</div><div class="sub">${esc(a.db?.volume || "")}</div></td>
+      <td>${statusPill(a.status)}</td><td class="hide-sm">${esc(ENGINE_LABEL[a.db?.engine] || "")}<div class="sub">${esc(a.db?.image || "")}</div></td>
+      <td class="r mono" style="font-size:13px">127.0.0.1:${a.port}</td><td class="r hide-sm">${a.memory == null ? '<span class="dash">—</span>' : fmt.bytes(a.memory)}</td>
+      <td class="r"><span class="row-actions"><button class="btn ghost sm" data-action="copy" data-text="${esc(a.db?.url || "")}">${ic("copy", 14)}URL</button><button class="btn ghost icon sm" data-action="app-menu" data-app="${a.name}" aria-label="More actions for ${esc(a.name)}">${ic("more")}</button></span></td></tr>`).join("")}
+  </tbody></table></div>`;
+}
+
+function dbConnectCard(app) {
+  const masked = (app.db?.url || "").replace(/(:\/\/[^:]*:)([^@]+)(@)/, (m, a, p, b) => a + "•".repeat(10) + b);
+  const others = (store.state?.apps || []).filter((x) => x.kind !== "db" && !x.adopted);
+  const linked = others.filter((x) => (x.env_keys || []).includes(app.db?.env_var));
+  return `<div class="card"><div class="card-head"><h2>Connect</h2><div class="right">Reachable from this machine only</div></div>
+    <div class="card-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="fix"><code id="db-url" data-masked="1">${esc(masked)}</code>
+        <button class="btn ghost sm" data-action="reveal-db" data-url="${esc(app.db?.url || "")}" data-masked="${esc(masked)}">${ic("eye", 14)}Show</button>
+        <button class="btn ghost sm" data-action="copy" data-text="${esc(app.db?.url || "")}">${ic("copy", 14)}Copy</button></div>
+      <form class="actions" id="link-form" style="align-items:flex-end">
+        <div class="field" style="min-width:220px;flex:1"><label for="link-app">Give an app this database</label>
+          <select class="select" id="link-app">${others.length ? others.map((x) => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("") : "<option value=''>No apps yet</option>"}</select></div>
+        <div class="field" style="width:200px"><label for="link-var">As</label><input class="input mono" id="link-var" value="${esc(app.db?.env_var || "DATABASE_URL")}" spellcheck="false"></div>
+        <button class="btn primary" type="submit" ${others.length ? "" : "disabled"}>${ic("link")}Link and restart</button>
+      </form>
+      <div class="muted" style="font-size:13px">${linked.length ? `Linked to ${linked.map((x) => `<a href="/apps/${esc(x.name)}/environment" data-link>${esc(x.name)}</a>`).join(", ")}.` : "Not linked to any app yet."} Same as <span class="mono">hoist link ${esc(app.name)} &lt;app&gt;</span>.</div>
+    </div></div>`;
+}
+
+VIEWS.databases = () => ({
+  title: "Databases",
+  crumbs: [["Databases", "/databases"]],
+  layout: () => `<div class="title-row"><div class="titles"><h1>Databases</h1><div class="subline">PostgreSQL, MySQL, Redis and MongoDB in Docker, with their own volume and password, reachable from this machine only.</div></div>
+    <div class="actions"><button class="btn primary" data-action="new-db">${ic("plus")}New database</button></div></div>${part("list")}`,
+  parts: {
+    list() {
+      if (!store.state) return `<div class="skeleton" style="height:140px"></div>`;
+      const dbs = store.state.apps.filter((a) => a.kind === "db");
+      if (!dbs.length) return `<div class="card"><div class="empty"><h2>No databases yet</h2><p style="margin:0;max-width:480px">Start one in a few seconds, then link it to an app: hoist puts the connection URL in the app's environment and restarts it.</p>
+        <div class="actions" style="justify-content:center">${Object.entries(ENGINE_LABEL).map(([k, l]) => `<button class="btn" data-action="new-db" data-engine="${k}">${l}</button>`).join("")}</div>
+        <span class="cmd">hoist db postgres --name votes</span></div></div>`;
+      return `<div class="card">${dbTable(dbs)}</div>`;
+    },
+  },
+});
+
+VIEWS.team = () => ({
+  title: "Team",
+  crumbs: [["Team", "/team"]],
+  layout: () => `<div class="title-row"><div class="titles"><h1>Team</h1><div class="subline">Everyone gets their own sign-in link. Every change in the dashboard is logged with who made it.</div></div></div>
+    <div class="grid-3-1" style="align-items:start">${part("people", "card")}${part("add", "card")}</div>${part("audit", "card")}`,
+  parts: {
+    people() {
+      const t = store.team; if (!t) return `<div class="card-body"><div class="skeleton" style="height:100px"></div></div>`;
+      return `<div class="card-head"><h2>People</h2><div class="right">${fmt.plural(t.people.length, "person", "people")}</div></div>
+        <div class="table-wrap"><table class="t stack"><thead><tr><th>Name</th><th>Role</th><th class="hide-sm">Added</th><th class="r">Last active</th><th></th></tr></thead><tbody>
+        ${t.people.map((p) => `<tr><td class="name">${esc(p.name)}${p.name === t.me ? ' <span class="pill">You</span>' : ""}</td><td>${p.role === "owner" ? "Owner" : "Member"}</td>
+          <td class="hide-sm">${p.added ? esc(fmt.when(p.added)) : '<span class="dash">—</span>'}</td><td class="r">${p.seen ? fmt.ago(p.seen) : '<span class="dash">not since this dashboard started</span>'}</td>
+          <td class="r">${t.me === "owner" && p.role !== "owner" ? `<button class="btn ghost sm danger" data-action="remove-user" data-user="${esc(p.name)}">Remove</button>` : ""}</td></tr>`).join("")}
+        </tbody></table></div>`;
+    },
+    add() {
+      const t = store.team; if (!t) return "";
+      if (t.me !== "owner") return `<div class="card-head"><h2>Add a teammate</h2></div><div class="card-body muted">Only the owner can add or remove people.</div>`;
+      return `<div class="card-head"><h2>Add a teammate</h2></div>
+        <form class="card-body" id="add-user" style="display:flex;flex-direction:column;gap:12px">
+          <div class="field"><label for="new-user">Name</label><input class="input" id="new-user" placeholder="shreyas" pattern="[a-z][a-z0-9_\\-]{0,23}" required autocomplete="off" spellcheck="false"><span class="hint">Lowercase, used in the audit log.</span></div>
+          <button class="btn primary" type="submit">${ic("plus")}Create sign-in link</button>
+          <div id="new-link" class="hidden"></div>
+        </form>`;
+    },
+    audit() {
+      const rows = store.team?.audit || [];
+      return `<div class="card-head"><h2>Audit log</h2><div class="right">newest first · env values are never logged</div></div>
+        ${rows.length ? `<div class="table-wrap"><table class="t stack"><thead><tr><th>When</th><th>Who</th><th>What</th><th>App</th><th class="hide-sm">Detail</th></tr></thead><tbody>
+          ${rows.slice(0, 100).map((r) => `<tr><td class="nowrap" title="${esc(fmt.when(r.t))}">${fmt.ago(r.t)}</td><td class="name">${esc(r.user)}</td><td>${esc(r.action)}</td>
+            <td>${!r.target ? '<span class="dash">—</span>' : appByName(r.target) ? `<a href="/apps/${esc(r.target)}" data-link>${esc(r.target)}</a>` : esc(r.target)}</td><td class="hide-sm muted">${esc(r.detail || "")}</td></tr>`).join("")}
+          </tbody></table></div>` : `<div class="empty">Nothing yet. Deploys, restarts, env changes and rollbacks from the dashboard show up here.</div>`}`;
+    },
+  },
+  mount() {
+    $("#page").addEventListener("submit", async (e) => {
+      if (e.target.id !== "add-user") return;
+      e.preventDefault();
+      const name = $("#new-user").value.trim();
+      try {
+        const r = await post("/api/team", { name, origin: location.origin });
+        const box = $("#new-link"); box.classList.remove("hidden");
+        box.innerHTML = `<div class="notice info" style="flex-direction:column;gap:8px"><strong>Send this to ${esc(r.name)}. It is shown once.</strong><div class="fix" style="width:100%"><code>${esc(r.link)}</code><button class="btn ghost icon sm" type="button" data-action="copy" data-text="${esc(r.link)}" aria-label="Copy link">${ic("copy", 14)}</button></div></div>`;
+        $("#new-user").value = "";
+        $('[data-part="add"]').dataset.hold = "1";
+        poll();
+      } catch (err) { toast(err.message, true); }
+    });
+  },
+});
 
 VIEWS.notfound = () => ({
   title: "Not found", crumbs: [["Not found", "/"]],

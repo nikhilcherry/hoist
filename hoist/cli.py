@@ -5,15 +5,17 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import re
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
+import shlex
 import shutil
 import subprocess
 
-from . import config, detect, notify, qr, service, source, tunnel, ui
+from . import config, containers, detect, notify, qr, service, source, tunnel, ui
 
 __version__ = "0.1.0"
 
@@ -28,7 +30,7 @@ class UserError(Exception):
 # --- helpers ------------------------------------------------------------------
 
 
-def _wait_for_healthy(name: str, port: int, timeout: float = HEALTH_TIMEOUT) -> str:
+def _wait_for_healthy(name: str, port: int, timeout: float = HEALTH_TIMEOUT, check=None) -> str:
     """Wait for the port to open. Returns "up", "failed" or "timeout".
 
     The unit state is watched alongside the port so a crashed app is reported
@@ -36,7 +38,7 @@ def _wait_for_healthy(name: str, port: int, timeout: float = HEALTH_TIMEOUT) -> 
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if detect.port_in_use(port):
+        if (check or detect.port_in_use)(port):
             return "up"
         if service.status(name) == "failed":
             return "failed"
@@ -46,8 +48,8 @@ def _wait_for_healthy(name: str, port: int, timeout: float = HEALTH_TIMEOUT) -> 
     return "timeout"
 
 
-def _report_health(name: str, port: int) -> str:
-    health = _wait_for_healthy(name, port)
+def _report_health(name: str, port: int, timeout: float = HEALTH_TIMEOUT, check=None) -> str:
+    health = _wait_for_healthy(name, port, timeout, check)
     if health == "up":
         ui.ok(f"listening on 127.0.0.1:{port}")
         return health
@@ -56,7 +58,7 @@ def _report_health(name: str, port: int) -> str:
     elif health == "failed":
         ui.fail(f"{name} failed to start")
     else:
-        ui.warn(f"nothing listening on port {port} after {int(HEALTH_TIMEOUT)}s")
+        ui.warn(f"nothing listening on port {port} after {int(timeout)}s")
     tail = service.recent_logs(name)
     for line in tail.splitlines()[-8:]:
         ui.step(line)
@@ -97,6 +99,8 @@ def _show_qr(url: str, ascii_mode: bool = False) -> None:
 
 
 def _app_url(app: dict) -> str:
+    if app.get("kind") == "db":
+        return app["db"]["url"]
     if app.get("tunnel"):
         return f"https://{app['hostname']}"
     return f"http://{app.get('lan_ip', '127.0.0.1')}:{app['port']}"
@@ -212,9 +216,37 @@ def cmd_up(args: argparse.Namespace) -> int:
     else:
         command, how = detect.detect_command(target)
 
+    kind = None
+    compose_path = None
+    generated = False
+    if command == detect.DOCKERFILE:
+        if not containers.available():
+            raise UserError("this project has a Dockerfile, and hoist needs a running Docker for it")
+        compose_path = containers.ensure_dockerfile_compose(target)
+        generated = True
+        how = f"Dockerfile (port {containers.dockerfile_port(target)} inside)"
+        command = detect.COMPOSE
+    if command == detect.COMPOSE:
+        if not containers.available():
+            raise UserError("this project is a Compose stack, and hoist needs a running Docker for it")
+        compose_path = compose_path or containers.compose_file(target)
+        kind = "compose"
+        if not generated:
+            how = f"Compose stack ({compose_path.name})"
+        command = containers.compose_up_command(name, generated) + ("" if repo is not None else " --build")
+        if not args.port and not containers.compose_uses_port_var(compose_path):
+            published = containers.compose_published_port(compose_path)
+            if published is None:
+                raise UserError("the compose file publishes no port — add `ports: [\"${PORT}:<container port>\"]`"
+                                " to the web service, or pass --port")
+            args.port = published
+
     if repo is not None:
         build = getattr(args, "build", None)
-        steps = [build] if build else source.detect_build(target, command)
+        if kind == "compose" and not build:
+            steps = [containers.compose_build_step(name, generated)]
+        else:
+            steps = [build] if build else source.detect_build(target, command)
         ok, detail = source.run_build(target, steps, log=ui.step)
         if not ok:
             shutil.rmtree(target, ignore_errors=True)
@@ -275,6 +307,12 @@ def cmd_up(args: argparse.Namespace) -> int:
     }
     if repo is not None:
         app["repo"] = repo
+    if kind == "compose":
+        app["kind"] = "compose"
+    if generated:
+        app["dockerfile"] = True
+    if getattr(args, "preview_of", None):
+        app["preview_of"] = args.preview_of
 
     ui.info(f"{ui.bold(name)} {ui.dim('·')} {how} {ui.dim('·')} port {port}")
     ui.step(f"$ {command.replace('$PORT', str(port))}")
@@ -291,7 +329,8 @@ def cmd_up(args: argparse.Namespace) -> int:
     except service.ServiceError as exc:
         raise UserError(f"failed to start service: {exc}") from exc
 
-    health = _report_health(name, port)
+    health = _report_health(name, port, timeout=240 if kind == "compose" else HEALTH_TIMEOUT,
+                            check=detect.http_answers if kind == "compose" else None)
 
     # The app is running from here on, so record it before anything that can
     # fail -- otherwise a failed tunnel step leaves a live service that
@@ -369,12 +408,16 @@ def cmd_ls(args: argparse.Namespace) -> int:
         else:
             health = ui.dim(unit_state)
         repo = app.get("repo")
-        src = f"{repo['branch']}@{repo.get('sha', '')[:7]}" if repo else ui.dim("local")
+        src = (f"{repo['branch']}@{repo.get('sha', '')[:7]}" if repo
+               else app["db"]["engine"] if app.get("kind") == "db" else ui.dim("local"))
         if repo and repo.get("paused"):
             src += " " + ui.yellow("(paused)")
         if repo and repo.get("failed_sha"):
             src += " " + ui.red(f"(build of {repo['failed_sha'][:7]} failed)")
-        rows.append([name, str(app["port"]), health, src, _app_url(app)])
+        shown = _app_url(app)
+        if app.get("kind") == "db":  # never print a password in a listing
+            shown = re.sub(r"(://[^:/@]*:)[^@]+@", r"\1•••@", shown)
+        rows.append([name, str(app["port"]), health, src, shown])
     ui.table(rows, ["NAME", "PORT", "STATE", "SOURCE", "URL"])
     return 0
 
@@ -393,6 +436,20 @@ def cmd_down(args: argparse.Namespace) -> int:
     if not app.get("adopted"):
         service.stop_and_remove(args.name)
         ui.ok("service stopped and removed")
+    if app.get("kind") == "compose":
+        containers.compose_down(args.name)
+        ui.ok("compose stack removed")
+    if app.get("kind") == "db":
+        containers.run("rm", "-f", containers.container_name(args.name), timeout=60)
+        base = containers.backup_unit_base(args.name)
+        service.systemctl("disable", "--now", f"{base}.timer")
+        for suffix in (".timer", ".service"):
+            (service.UNIT_DIR / f"{base}{suffix}").unlink(missing_ok=True)
+        if getattr(args, "purge", False):
+            containers.remove_volume(args.name)
+            ui.ok(f"data volume {app['db']['volume']} deleted")
+        else:
+            ui.step(f"data kept in volume {app['db']['volume']} — `hoist down {args.name} --purge` deletes it")
 
     if app.get("tunnel"):
         try:
@@ -459,6 +516,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
             raise UserError(str(exc)) from exc
         print(f"fetch skipped: {exc}")
         return 0  # offline or rate-limited; the next tick tries again
+    if not manual and repo.get("previews") and not app.get("preview_of"):
+        _reconcile_previews(args.name, app)
     if wanted in (repo.get("sha"), repo.get("failed_sha")) and not manual:
         return 0
 
@@ -480,10 +539,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 raise UserError(str(exc)) from exc
             print(f"skipped: {exc}")
             return 0
+        if app.get("dockerfile"):
+            containers.ensure_dockerfile_compose(release)
         ok, detail = source.run_build(release, repo.get("build", []), transcript=transcript)
 
     entry = {"sha": wanted, "commit": commit, "at": config.now(), "trigger": trigger,
              "seconds": round(time.monotonic() - started, 1)}
+    if os.environ.get("HOIST_ACTOR"):
+        entry["by"] = os.environ["HOIST_ACTOR"]
     if not ok:
         shutil.rmtree(release, ignore_errors=True)  # never live, never needed
         entry.update(status="failed", log=transcript[-60:], error=detail.splitlines()[0])
@@ -518,13 +581,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
         app["repo"].pop("failed_sha", None)
         if to:
             app["repo"]["paused"] = True
-        stopped, port = bool(app.get("stopped")), int(app["port"])
+        stopped, port, kind = bool(app.get("stopped")), int(app["port"]), app.get("kind")
         hostname = app.get("hostname") if app.get("tunnel") else None
 
     # Restart and wait outside the lock: health checks take seconds.
     if not stopped:
         service.restart(args.name)
-        health = _wait_for_healthy(args.name, port)
+        health = _wait_for_healthy(args.name, port, 240 if kind == "compose" else HEALTH_TIMEOUT,
+                                   detect.http_answers if kind == "compose" else None)
     else:
         health = "stopped"
     entry.update(status="ok" if health in ("up", "stopped") else "unhealthy",
@@ -539,6 +603,92 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 level="ok" if entry["status"] == "ok" else "warn", app=args.name)
     if to:
         print("auto-deploy paused after rollback — resume with: hoist resume " + args.name)
+    return 0
+
+
+PREVIEW_LIMIT = 5
+
+
+def preview_name(app: str, branch: str) -> str:
+    return detect.slug(f"{app}-{branch}")[:40].strip("-")
+
+
+def _reconcile_previews(name: str, app: dict) -> None:
+    """One preview app per branch: create it on a new branch, remove it when the
+    branch is deleted. At most one new preview per tick, so a burst of branches
+    never stalls the main app's deploys."""
+    repo = app["repo"]
+    try:
+        heads = source.remote_branches(source.checkout_dir(name))
+    except source.SourceError as exc:
+        print(f"previews skipped: {exc}")
+        return
+    state = config.load()
+    existing = {a["repo"]["branch"]: n for n, a in state["apps"].items()
+                if a.get("preview_of") == name and a.get("repo")}
+    hoist = [sys.executable, "-m", "hoist"]
+    for branch, pname in existing.items():
+        if branch not in heads:
+            print(f"branch {branch} is gone, removing preview {pname}")
+            subprocess.run([*hoist, "down", pname], capture_output=True, text=True, timeout=300)
+            notify.send(f"Preview {pname} removed", f"Branch {branch} was deleted.", level="info", app=pname)
+    failed = dict(repo.get("preview_failed") or {})
+    for branch in sorted(heads):
+        if branch == repo["branch"] or branch in existing:
+            continue
+        if failed.get(branch) == heads[branch]:
+            continue  # this commit already failed; wait for a new push to the branch
+        if len(existing) >= PREVIEW_LIMIT:
+            print(f"preview limit ({PREVIEW_LIMIT}) reached; {branch} gets no preview")
+            break
+        pname = preview_name(name, branch)
+        if config.get_app(state, pname):
+            continue
+        args = [*hoist, "up", repo["url"], "--branch", branch, "--name", pname, "--no-qr",
+                "--preview-of", name]
+        if not app.get("tunnel"):
+            args.append("--local")
+        for key, value in (app.get("env") or {}).items():
+            args += ["--env", f"{key}={value}"]
+        print(f"new branch {branch}: deploying preview {pname}")
+        result = subprocess.run(args, capture_output=True, text=True, timeout=1200)
+        print((result.stdout + result.stderr).strip()[-2000:])
+        with config.transaction() as fresh_state:
+            main = config.get_app(fresh_state, name)
+            if main and main.get("repo"):
+                record = main["repo"].setdefault("preview_failed", {})
+                if result.returncode == 0:
+                    record.pop(branch, None)
+                else:
+                    record[branch] = heads[branch]
+                for gone in [b for b in record if b not in heads]:
+                    record.pop(gone)
+        if result.returncode == 0:
+            fresh = config.get_app(config.load(), pname) or {}
+            url = _app_url(fresh) if fresh else ""
+            notify.send(f"Preview of {branch} is live", f"{pname}: {url}", level="ok", app=pname)
+        else:
+            notify.send(f"Preview of {branch} failed to build", f"{pname} — fix the branch and push again.",
+                        level="bad", app=name)
+        break  # one new preview per tick
+
+
+def cmd_previews(args: argparse.Namespace) -> int:
+    with config.transaction() as state:
+        app = config.get_app(state, args.name)
+        if app is None or not app.get("repo"):
+            raise UserError(f"{args.name!r} is not deployed from git")
+        if app.get("preview_of"):
+            raise UserError(f"{args.name} is itself a preview")
+        if args.state == "on":
+            app["repo"]["previews"] = True
+        else:
+            app["repo"].pop("previews", None)
+    if args.state == "on":
+        ui.ok(f"every branch pushed to {app['repo']['url']} gets its own preview app "
+              f"(up to {PREVIEW_LIMIT}), removed when the branch is deleted")
+    else:
+        ui.ok("branch previews off — existing previews stay until you take them down")
     return 0
 
 
@@ -751,6 +901,200 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
+def cmd_db(args: argparse.Namespace) -> int:
+    """A database in one command: Docker, a private volume, a generated password."""
+    try:
+        containers.docker()
+    except containers.ContainerError as exc:
+        raise UserError(str(exc)) from exc
+    name = detect.slug(args.name or args.engine)
+    state = config.load()
+    if config.get_app(state, name):
+        raise UserError(f"{name} already exists — pick another --name")
+    port = args.port or detect.free_port()
+    if not detect.port_is_free(port):
+        raise UserError(f"port {port} is already in use")
+    db = containers.database_spec(args.engine, name, port, args.image)
+    meta = containers.ENGINES[args.engine]
+    ui.info(f"{ui.bold(name)} {ui.dim('·')} {meta['label']} {ui.dim('·')} 127.0.0.1:{port}")
+    try:
+        containers.pull(db["image"], log=ui.step)
+    except containers.ContainerError as exc:
+        raise UserError(str(exc)) from exc
+    app = {
+        "name": name, "port": port, "workdir": str(Path.home()),
+        "cmd": containers.database_command(name, db), "env": {}, "tunnel": False,
+        "hostname": None, "kind": "db", "db": db, "pre": containers.pre_start(name),
+        "created": config.now(), "updated": config.now(),
+    }
+    service.write_unit(app)
+    service.start(name)
+    with config.transaction() as state:
+        config.put_app(state, app)
+    health = _report_health(name, port, timeout=180, check=lambda _p: containers.ready(name, db))
+    ui.banner(db["url"], f"hoist link {name} <app>   ·   hoist down {name}")
+    ui.step("reachable from this machine only; data lives in the volume " + db["volume"])
+    return 0 if health == "up" else 1
+
+
+def cmd_exec(args: argparse.Namespace) -> int:
+    """Run one command in an app's own environment: its folder and env for a
+    process, its container for a database, its first service for a stack."""
+    app = config.get_app(config.load(), args.name)
+    if app is None:
+        raise UserError(f"no hoisted app called {args.name!r}")
+    if app.get("adopted"):
+        raise UserError(f"{args.name} was adopted; hoist does not know where it runs")
+    command = " ".join(args.command)
+    if not command.strip():
+        raise UserError("nothing to run")
+    if app.get("kind") == "db":
+        argv = [*shlex.split(containers.docker()), "exec", containers.container_name(args.name),
+                "sh", "-c", command]
+        env, cwd = None, None
+    elif app.get("kind") == "compose":
+        base = [*shlex.split(containers.docker()), "compose", "-p", containers.compose_project(args.name)]
+        services = subprocess.run([*base, "ps", "--services"], capture_output=True, text=True,
+                                  cwd=app["workdir"]).stdout.split()
+        if not services:
+            raise UserError(f"{args.name} has no running containers")
+        target = args.service or next((s for s in ("web", "app", "api", "server") if s in services), services[0])
+        argv = [*base, "exec", "-T", target, "sh", "-c", command]
+        env, cwd = None, app["workdir"]
+    else:
+        argv = ["/bin/sh", "-lc", command]
+        env = dict(os.environ, PORT=str(app["port"]), HOIST_APP=args.name, **(app.get("env") or {}))
+        cwd = app["workdir"]
+    print(f"$ {command}", flush=True)
+    try:
+        return subprocess.run(argv, env=env, cwd=cwd, timeout=args.timeout).returncode
+    except subprocess.TimeoutExpired:
+        ui.fail(f"stopped after {args.timeout}s")
+        return 124
+
+
+def cmd_template(args: argparse.Namespace) -> int:
+    if args.id in (None, "list"):
+        ui.table([[k, v["label"], v["about"]] for k, v in containers.TEMPLATES.items()],
+                 ["ID", "APP", "WHAT IT IS"])
+        return 0
+    if args.id not in containers.TEMPLATES:
+        raise UserError(f"no template {args.id!r} — see: hoist template list")
+    try:
+        containers.docker()
+    except containers.ContainerError as exc:
+        raise UserError(str(exc)) from exc
+    spec = containers.TEMPLATES[args.id]
+    name = detect.slug(args.name or args.id)
+    if config.get_app(config.load(), name):
+        raise UserError(f"{name} already exists — pick another --name")
+    folder = containers.template_dir(name)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "compose.yml").write_text(containers.template_compose(args.id))
+    ui.info(f"{ui.bold(name)} {ui.dim('·')} {spec['label']} {ui.dim('·')} {spec['image']}")
+    try:
+        containers.pull(spec["image"], log=ui.step)
+    except containers.ContainerError as exc:
+        raise UserError(str(exc)) from exc
+    up_args = argparse.Namespace(
+        target=str(folder), name=name, port=None, cmd=None, domain=args.domain, hostname=None,
+        env=None, local=args.local, no_qr=args.no_qr, ascii=False, branch=None, build=None,
+        no_sync=True, preview_of=None)
+    code = cmd_up(up_args)
+    with config.transaction() as state:
+        if name in state["apps"]:
+            state["apps"][name]["template"] = args.id
+    return code
+
+
+def _db_app(name: str) -> dict:
+    app = config.get_app(config.load(), name)
+    if app is None or app.get("kind") != "db":
+        raise UserError(f"{name!r} is not a hoist database")
+    return app
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    app = _db_app(args.name)
+    base = containers.backup_unit_base(args.name)
+    if args.offsite:
+        with config.transaction() as state:
+            db = state["apps"][args.name]["db"]
+            if args.offsite == "off":
+                db.pop("offsite", None)
+            else:
+                db["offsite"] = args.offsite
+        ui.ok("off-site copies off" if args.offsite == "off" else f"every backup is also copied to {args.offsite}")
+        return 0
+    if args.daily or args.no_schedule:
+        if args.daily:
+            svc, timer = containers.render_backup_units(
+                args.name, sys.executable, str(Path(__file__).resolve().parent.parent),
+                os.environ.get("HOIST_HOME"))
+            service.UNIT_DIR.mkdir(parents=True, exist_ok=True)
+            (service.UNIT_DIR / f"{base}.service").write_text(svc)
+            (service.UNIT_DIR / f"{base}.timer").write_text(timer)
+            service.systemctl("daemon-reload")
+            service.systemctl("enable", "--now", f"{base}.timer")
+            with config.transaction() as state:
+                state["apps"][args.name]["db"]["daily_backup"] = True
+            ui.ok(f"{args.name} is backed up every day; the newest {containers.BACKUP_KEEP} are kept")
+        else:
+            service.systemctl("disable", "--now", f"{base}.timer")
+            for suffix in (".timer", ".service"):
+                (service.UNIT_DIR / f"{base}{suffix}").unlink(missing_ok=True)
+            service.systemctl("daemon-reload")
+            with config.transaction() as state:
+                state["apps"][args.name]["db"].pop("daily_backup", None)
+            ui.ok(f"daily backups of {args.name} turned off (existing files kept)")
+        return 0
+    if args.list:
+        rows = [[b["file"], f"{b['size'] / 1024:.1f} KB", time.strftime("%Y-%m-%d %H:%M", time.localtime(b["at"]))]
+                for b in containers.list_backups(args.name)]
+        if rows:
+            ui.table(rows, ["FILE", "SIZE", "TAKEN"])
+        else:
+            ui.info("no backups yet")
+        return 0
+    if args.restore:
+        target = containers.backup_dir(args.name) / Path(args.restore).name
+        if not target.is_file():
+            raise UserError(f"no backup called {args.restore!r} — see hoist backup {args.name} --list")
+        ui.step(f"restoring {target.name} into {args.name}")
+        containers.restore(args.name, app["db"], target, service.systemctl)
+        ui.ok(f"{args.name} restored from {target.name}")
+        notify.send(f"{args.name} restored from a backup", target.name, level="warn", app=args.name)
+        return 0
+    try:
+        path = containers.backup(args.name, app["db"])
+    except containers.ContainerError as exc:
+        notify.send(f"Backup of {args.name} failed", str(exc), level="bad", app=args.name)
+        raise UserError(str(exc)) from exc
+    ui.ok(f"backed up {args.name} → {path} ({path.stat().st_size / 1024:.1f} KB)")
+    return 0
+
+
+def cmd_link(args: argparse.Namespace) -> int:
+    """Put a database's URL into an app's environment and restart the app."""
+    with config.transaction() as state:
+        db = config.get_app(state, args.db)
+        app = config.get_app(state, args.app)
+        if db is None or db.get("kind") != "db":
+            raise UserError(f"{args.db!r} is not a hoist database")
+        if app is None:
+            raise UserError(f"no hoisted app called {args.app!r}")
+        if app.get("adopted"):
+            raise UserError(f"{args.app} was adopted; hoist does not manage its environment")
+        var = args.var or db["db"]["env_var"]
+        app.setdefault("env", {})[var] = db["db"]["url"]
+        app["updated"] = config.now()
+        service.write_unit(app)
+    if not app.get("stopped"):
+        service.restart(args.app)
+    ui.ok(f"{args.app} now has {var} pointing at {args.db} (restarted)")
+    return 0
+
+
 def cmd_limit(args: argparse.Namespace) -> int:
     import re as _re
     with config.transaction() as state:
@@ -759,6 +1103,9 @@ def cmd_limit(args: argparse.Namespace) -> int:
             raise UserError(f"no hoisted app called {args.name!r}")
         if app.get("adopted"):
             raise UserError(f"{args.name} was adopted; hoist does not manage its process")
+        if app.get("kind") == "compose":
+            raise UserError("a Compose stack sets its limits per service in the compose file "
+                            "(deploy.resources.limits) — hoist cannot cap the containers from outside")
         limits = dict(app.get("limits") or {})
         for key, value, pattern, example in (("memory", args.memory, service.LIMIT_MEMORY, "512M"),
                                              ("cpu", args.cpu, service.LIMIT_CPU, "50%")):
@@ -775,6 +1122,8 @@ def cmd_limit(args: argparse.Namespace) -> int:
             app["limits"] = limits
         else:
             app.pop("limits", None)
+        if app.get("kind") == "db":
+            app["cmd"] = containers.database_command(args.name, app["db"], limits)
         service.write_unit(app)
     if not app.get("stopped"):
         service.restart(args.name)
@@ -837,8 +1186,31 @@ WantedBy=default.target
 def cmd_dash(args: argparse.Namespace) -> int:
     from .dash import server
 
+    from .dash import team
+
     token = server.load_token(reset=args.reset_token)
     port = args.port
+    base = (config.load().get("dash_url") or f"http://127.0.0.1:{port}").rstrip("/")
+    if args.add_user:
+        try:
+            member = team.add(args.add_user)
+        except team.TeamError as exc:
+            raise UserError(str(exc)) from exc
+        team.audit("owner", "add teammate", args.add_user.lower(), "from the CLI")
+        ui.ok(f"{args.add_user} can sign in with this link (shown once):")
+        ui.banner(f"{base}/?token={member}", f"hoist dash --remove-user {args.add_user} revokes it")
+        return 0
+    if args.remove_user:
+        if not team.remove(args.remove_user):
+            raise UserError(f"no teammate called {args.remove_user!r}")
+        team.audit("owner", "remove teammate", args.remove_user, "from the CLI")
+        ui.ok(f"{args.remove_user} is signed out and their link no longer works")
+        return 0
+    if args.users:
+        people = team.users()
+        ui.table([["owner", "owner", "—"]] + [[n, "member", i.get("added", "")] for n, i in sorted(people.items())],
+                 ["NAME", "ROLE", "ADDED"])
+        return 0
 
     if args.service or args.public:
         unit = service.UNIT_DIR / "hoist--dash.service"
@@ -860,6 +1232,8 @@ def cmd_dash(args: argparse.Namespace) -> int:
             updated = _apply_ingress(cf_path, cf_text, DASH_TUNNEL_NAME, hostname, port)
             _publish(updated, hostname)
             url = f"https://{hostname}"
+            with config.transaction() as st:
+                st["dash_url"] = url
         ui.banner(f"{url}/?token={token}", "open this once; the browser remembers you")
         return 0
 
@@ -916,6 +1290,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--local", action="store_true", help="LAN URL only, no tunnel")
     up.add_argument("--branch", help="git branch to deploy (repo URLs only)")
     up.add_argument("--build", help="build command for a repo, overriding detection")
+    up.add_argument("--preview-of", help=argparse.SUPPRESS)
     up.add_argument("--no-sync", action="store_true",
                     help="deploy a repo once, without redeploying on push")
     add_qr_flags(up)
@@ -937,6 +1312,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     down = sub.add_parser("down", help="stop an app and remove its ingress rule")
     down.add_argument("name")
+    down.add_argument("--purge", action="store_true", help="for a database, also delete its data")
     down.set_defaults(func=cmd_down)
 
     sync = sub.add_parser("sync", help="redeploy a git-backed app if its branch moved")
@@ -984,6 +1360,49 @@ def build_parser() -> argparse.ArgumentParser:
     add_qr_flags(adopt)
     adopt.set_defaults(func=cmd_adopt)
 
+    db = sub.add_parser("db", help="start a database: postgres, mysql, redis or mongo")
+    db.add_argument("engine", choices=sorted(containers.ENGINES))
+    db.add_argument("--name", help="app name (default: the engine)")
+    db.add_argument("--port", type=int, help="host port on 127.0.0.1 (default: free)")
+    db.add_argument("--image", help="override the image, e.g. postgres:17")
+    db.set_defaults(func=cmd_db)
+
+    ex = sub.add_parser("exec", help="run one command in an app's environment")
+    ex.add_argument("name")
+    ex.add_argument("command", nargs=argparse.REMAINDER, help="the command (quote it, or put it after --)")
+    ex.add_argument("--service", help="Compose service to run in (default: the first)")
+    ex.add_argument("--timeout", type=int, default=600)
+    ex.set_defaults(func=cmd_exec)
+
+    tpl = sub.add_parser("template", help="one-click apps: uptime-kuma, n8n, ntfy, excalidraw...")
+    tpl.add_argument("id", nargs="?", help="template id, or `list`")
+    tpl.add_argument("--name", help="app name (default: the template id)")
+    tpl.add_argument("--local", action="store_true", help="LAN URL only, no tunnel")
+    tpl.add_argument("--domain")
+    add_qr_flags(tpl)
+    tpl.set_defaults(func=cmd_template)
+
+    bk = sub.add_parser("backup", help="back up, list or restore a database")
+    bk.add_argument("name")
+    bk.add_argument("--list", action="store_true", help="list backups")
+    bk.add_argument("--restore", metavar="FILE", help="load this backup into the database")
+    bk.add_argument("--daily", action="store_true", help="back up every day")
+    bk.add_argument("--no-schedule", action="store_true", help="stop daily backups")
+    bk.add_argument("--offsite", metavar="TARGET",
+                    help="also copy every backup to an rclone remote (gdrive:hoist) or a folder; 'off' stops it")
+    bk.set_defaults(func=cmd_backup)
+
+    link = sub.add_parser("link", help="give an app a database's URL")
+    link.add_argument("db")
+    link.add_argument("app")
+    link.add_argument("--var", help="variable name (default: DATABASE_URL, REDIS_URL...)")
+    link.set_defaults(func=cmd_link)
+
+    prev = sub.add_parser("previews", help="give every branch its own preview app")
+    prev.add_argument("name")
+    prev.add_argument("state", choices=["on", "off"])
+    prev.set_defaults(func=cmd_previews)
+
     lim = sub.add_parser("limit", help="cap an app's memory or CPU")
     lim.add_argument("name")
     lim.add_argument("--memory", help="e.g. 512M or 2G; 'off' removes it")
@@ -1004,6 +1423,9 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--public", metavar="NAME", help="also publish it, e.g. --public dash")
     dash.add_argument("--stop", action="store_true", help="stop and remove the dashboard service")
     dash.add_argument("--reset-token", action="store_true", help="sign every browser out")
+    dash.add_argument("--add-user", metavar="NAME", help="give a teammate their own sign-in link")
+    dash.add_argument("--remove-user", metavar="NAME", help="revoke a teammate's link")
+    dash.add_argument("--users", action="store_true", help="list who has access")
     dash.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
     dash.set_defaults(func=cmd_dash)
 
@@ -1021,7 +1443,7 @@ def main(argv: list[str] | None = None) -> int:
         ui.fail(str(exc))
         return 1
     except (tunnel.TunnelError, service.ServiceError, detect.DetectionError,
-            source.SourceError, config.StateError) as exc:
+            source.SourceError, config.StateError, containers.ContainerError) as exc:
         ui.fail(str(exc))
         return 1
     except KeyboardInterrupt:

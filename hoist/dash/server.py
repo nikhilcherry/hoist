@@ -29,8 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__ as VERSION
-from .. import config, detect, notify, qr, service, source
-from . import collect, jobs
+from .. import config, containers, detect, notify, qr, service, source
+from . import collect, jobs, team
 
 STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "hoist_dash"
@@ -61,6 +61,7 @@ def load_token(reset: bool = False) -> str:
 class Dashboard:
     def __init__(self, token: str) -> None:
         self.token = token
+        self.seen: dict[str, float] = {}
         self.monitor = collect.Monitor()
         self.jobs = jobs.Jobs(on_finish=lambda _job: self.monitor.nudge())
         self.monitor.start()
@@ -105,16 +106,23 @@ def make_handler(dash: Dashboard):
             proto = self.headers.get("X-Forwarded-Proto", "")
             return proto == "https" or bool(self.headers.get("Cf-Visitor"))
 
-        def _authed(self) -> bool:
-            cookies = self.headers.get("Cookie", "")
-            for part in cookies.split(";"):
+        def _token(self) -> str:
+            for part in self.headers.get("Cookie", "").split(";"):
                 key, _, value = part.strip().partition("=")
-                if key == COOKIE and hmac.compare_digest(value, dash.token):
-                    return True
+                if key == COOKIE and value:
+                    return value
             auth = self.headers.get("Authorization", "")
-            if auth.startswith("Bearer ") and hmac.compare_digest(auth[7:], dash.token):
-                return True
-            return False
+            return auth[7:] if auth.startswith("Bearer ") else ""
+
+        def _authed(self) -> bool:
+            self.user = team.identify(self._token(), dash.token)
+            if self.user:
+                dash.seen[self.user] = time.time()
+            return self.user is not None
+
+        def _cookie(self, token: str) -> str:
+            return (f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000"
+                    + ("; Secure" if self._secure() else ""))
 
         def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
             self.send_response(code)
@@ -197,9 +205,8 @@ def make_handler(dash: Dashboard):
             if path in ("/", "/index.html"):
                 given = (query.get("token") or [""])[0]
                 if given:
-                    if hmac.compare_digest(given, dash.token):
-                        cookie = (f"{COOKIE}={dash.token}; Path=/; HttpOnly; SameSite=Strict;"
-                                  f" Max-Age=2592000" + ("; Secure" if self._secure() else ""))
+                    if team.identify(given, dash.token):
+                        cookie = self._cookie(given)
                         nxt = (query.get("next") or ["/"])[0]
                         if not nxt.startswith("/") or nxt.startswith("//"):
                             nxt = "/"
@@ -228,11 +235,10 @@ def make_handler(dash: Dashboard):
                     given = str(self._body().get("token", ""))
                 except ValueError:
                     given = ""
-                if not given or not hmac.compare_digest(given, dash.token):
+                if not team.identify(given, dash.token):
                     time.sleep(0.75)
                     return self._error(401, "that token is not right")
-                cookie = (f"{COOKIE}={dash.token}; Path=/; HttpOnly; SameSite=Strict;"
-                          f" Max-Age=2592000" + ("; Secure" if self._secure() else ""))
+                cookie = self._cookie(given)
                 return self._send(200, b'{"ok":true}', "application/json", {"Set-Cookie": cookie})
             if path == "/api/logout":
                 return self._send(200, b'{"ok":true}', "application/json",
@@ -247,7 +253,7 @@ def make_handler(dash: Dashboard):
                 return self._error(400, str(exc))
             try:
                 return self._api_post(path, body)
-            except ValueError as exc:
+            except (ValueError, team.TeamError) as exc:
                 return self._error(400, str(exc))
 
         # -- GET endpoints --------------------------------------------------------
@@ -257,6 +263,7 @@ def make_handler(dash: Dashboard):
                 snap = dash.monitor.get()
                 snap["jobs"] = dash.jobs.recent()[:12]
                 snap["version"] = VERSION
+                snap["me"] = self.user
                 return self._json(snap)
 
             if path == "/api/deployments":
@@ -274,6 +281,20 @@ def make_handler(dash: Dashboard):
             if path == "/api/notify":
                 url = (config.load().get("notify") or {}).get("url")
                 return self._json({"url": url, "kind": notify.kind(url) if url else None})
+
+            if path == "/api/templates":
+                return self._json({"templates": [{"id": k, "label": v["label"], "about": v["about"],
+                                                  "image": v["image"]} for k, v in containers.TEMPLATES.items()],
+                                   "docker": containers.available()})
+
+            if path == "/api/team":
+                people = [{"name": team.OWNER, "role": "owner", "added": None,
+                           "seen": dash.seen.get(team.OWNER)}]
+                for name, info in sorted(team.users().items()):
+                    people.append({"name": name, "role": "member", "added": info.get("added"),
+                                   "seen": dash.seen.get(name)})
+                return self._json({"me": self.user, "people": people,
+                                   "audit": team.audit_tail(int((query.get("n") or ["200"])[0]))})
 
             if path == "/api/metrics":
                 return self._json({"system": dash.monitor.series()})
@@ -306,7 +327,7 @@ def make_handler(dash: Dashboard):
                     return self._json(job.as_dict(with_lines=True))
                 return self._stream_job(job)
 
-            match = re.fullmatch(r"/api/apps/([a-z0-9-]+)(/[a-z/]+)?", path)
+            match = re.fullmatch(r"/api/apps/([a-z0-9-]+)(/[a-z/]+(?:/[0-9]{8}-[0-9]{6}\.[a-z.]+)?)?", path)
             if match:
                 name, rest = match.group(1), match.group(2) or ""
                 if rest == "":
@@ -315,6 +336,20 @@ def make_handler(dash: Dashboard):
                 app = dash.app(name)
                 if app is None:
                     return self._error(404, "no such app")
+                if rest == "/backups":
+                    if app.get("kind") != "db":
+                        return self._error(400, "only databases have backups")
+                    return self._json({"backups": containers.list_backups(name),
+                                       "daily": bool(app["db"].get("daily_backup"))})
+                match_dl = re.fullmatch(r"/backups/([0-9]{8}-[0-9]{6}\.[a-z.]+)", rest)
+                if match_dl and app.get("kind") == "db":
+                    path = containers.backup_dir(name) / match_dl.group(1)
+                    if not path.is_file():
+                        return self._error(404, "no such backup")
+                    team.audit(self.user or "?", "download backup", name, path.name)
+                    data = path.read_bytes()
+                    return self._send(200, data, "application/octet-stream",
+                                      {"Content-Disposition": f'attachment; filename="{name}-{path.name}"'})
                 if rest in ("/logs", "/logs/stream"):
                     kind = (query.get("kind") or ["app"])[0]
                     if app.get("adopted"):
@@ -385,10 +420,59 @@ def make_handler(dash: Dashboard):
 
         # -- POST endpoints -------------------------------------------------------
 
+        def _audit(self, action: str, target: str | None = None, detail: str = "") -> None:
+            team.audit(self.user or "?", action, target, detail)
+
         def _api_post(self, path: str, body: dict) -> None:
             if path == "/api/apps":
+                self._audit("create app", str(body.get("name") or ""), str(body.get("target", ""))[:200])
                 return self._create(body)
+            if path == "/api/templates":
+                tid = str(body.get("id", ""))
+                if tid not in containers.TEMPLATES:
+                    raise ValueError("pick a template")
+                name = str(body.get("name", "") or tid).strip().lower()
+                if not _NAME.match(name):
+                    raise ValueError("name: lowercase letters, digits and dashes, up to 40")
+                if dash.app(name):
+                    raise ValueError(f"{name} already exists")
+                args = ["template", tid, "--name", name, "--no-qr"] + (["--local"] if body.get("local") else [])
+                self._audit("create from template", name, tid)
+                job = dash.jobs.start(f"Start {containers.TEMPLATES[tid]['label']} as {name}", args, name, self.user)
+                return self._json({"job": job.as_dict(), "app": name}, 202)
+            if path == "/api/databases":
+                engine = str(body.get("engine", ""))
+                if engine not in containers.ENGINES:
+                    raise ValueError("pick postgres, mysql, redis or mongo")
+                name = str(body.get("name", "") or engine).strip().lower()
+                if not _NAME.match(name):
+                    raise ValueError("name: lowercase letters, digits and dashes, up to 40")
+                if dash.app(name):
+                    raise ValueError(f"{name} already exists")
+                self._audit("create database", name, engine)
+                job = dash.jobs.start(f"Start {containers.ENGINES[engine]['label']} {name}",
+                                      ["db", engine, "--name", name], name, self.user)
+                return self._json({"job": job.as_dict(), "app": name}, 202)
+            if path == "/api/team":
+                if self.user != team.OWNER:
+                    return self._error(403, "only the owner can add people")
+                name = str(body.get("name", ""))
+                token = team.add(name)
+                self._audit("add teammate", name.strip().lower())
+                base = str(body.get("origin") or "").rstrip("/")
+                if not re.match(r"^https?://[^/\s]+$", base):
+                    base = ""
+                return self._json({"name": name.strip().lower(), "link": f"{base}/?token={token}"})
+            match = re.fullmatch(r"/api/team/([a-z][a-z0-9_-]{0,23})/remove", path)
+            if match:
+                if self.user != team.OWNER:
+                    return self._error(403, "only the owner can remove people")
+                if not team.remove(match.group(1)):
+                    return self._error(404, "no such teammate")
+                self._audit("remove teammate", match.group(1))
+                return self._json({"ok": True})
             if path == "/api/notify":
+                self._audit("set notifications", None, "webhook on" if body.get("url") else "off")
                 url = str(body.get("url") or "").strip()
                 if url and (not url.startswith(("https://", "http://")) or len(url) > 2000):
                     raise ValueError("expected a webhook URL starting with https://")
@@ -411,30 +495,75 @@ def make_handler(dash: Dashboard):
             app = dash.app(name)
             if app is None:
                 return self._error(404, "no such app")
+            detail = {"env": f"{len(body.get('env') or {})} variables (values not logged)",
+                      "rollback": f"to {str(body.get('sha', ''))[:12]}",
+                      "limits": f"memory {body.get('memory') or 'none'}, cpu {body.get('cpu') or 'none'}",
+                      "link": f"into {body.get('app', '')} as {body.get('var') or 'default'}"}.get(action, "")
+            self._audit(action, name, detail)
             running = dash.jobs.busy(name)
-            long_actions = {"redeploy", "rollback", "delete"}
+            long_actions = {"redeploy", "rollback", "delete", "backup", "restore"}
             if action in long_actions and running:
                 return self._json({"error": "another action is still running", "job": running.as_dict()}, 409)
 
             if action == "redeploy":
                 if not app.get("repo"):
                     return self._error(400, "only apps deployed from git can be redeployed")
-                job = dash.jobs.start(f"Redeploy {name}", ["sync", name, "--force"], name)
+                job = dash.jobs.start(f"Redeploy {name}", ["sync", name, "--force"], name, self.user)
                 return self._json({"job": job.as_dict()}, 202)
             if action == "rollback":
                 sha = str(body.get("sha", ""))
                 if not _SHA.match(sha):
                     return self._error(400, "a commit SHA is required")
-                job = dash.jobs.start(f"Roll back {name} to {sha[:7]}", ["sync", name, "--to", sha], name)
+                job = dash.jobs.start(f"Roll back {name} to {sha[:7]}", ["sync", name, "--to", sha], name, self.user)
                 return self._json({"job": job.as_dict()}, 202)
             if action == "delete":
-                job = dash.jobs.start(f"Take down {name}", ["down", name], name)
+                job = dash.jobs.start(f"Take down {name}", ["down", name] + (["--purge"] if body.get("purge") else []), name, self.user)
                 return self._json({"job": job.as_dict()}, 202)
 
             if action in ("restart", "stop", "start", "pause", "resume"):
                 return self._quick(name, app, action)
             if action == "env":
                 return self._set_env(name, body)
+            if action == "link":
+                target = str(body.get("app", ""))
+                if app.get("kind") != "db":
+                    return self._error(400, "only a database can be linked")
+                if not _NAME.match(target) or not dash.app(target):
+                    raise ValueError("pick an app to link")
+                args = ["link", name, target]
+                var = str(body.get("var", "") or "").strip()
+                if var:
+                    if not _ENV_KEY.match(var):
+                        raise ValueError(f"{var!r} is not a valid variable name")
+                    args += ["--var", var]
+                return self._run_quick(args)
+            if action == "exec":
+                if self.user != team.OWNER:
+                    return self._error(403, "only the owner can run commands")
+                command = str(body.get("command", "")).strip()
+                if not command or len(command) > 2000 or "\n" in command:
+                    raise ValueError("one command, on one line")
+                if running:
+                    return self._json({"error": "another action is still running", "job": running.as_dict()}, 409)
+                team.audit(self.user, "run command", name, command[:300])
+                job = dash.jobs.start(f"Run in {name}", ["exec", name, "--", command], name, self.user)
+                return self._json({"job": job.as_dict()}, 202)
+            if action in ("backup", "restore", "backup-schedule"):
+                if app.get("kind") != "db":
+                    return self._error(400, "only databases have backups")
+                if action == "backup":
+                    job = dash.jobs.start(f"Back up {name}", ["backup", name], name, self.user)
+                    return self._json({"job": job.as_dict()}, 202)
+                if action == "restore":
+                    file = str(body.get("file", ""))
+                    if not re.fullmatch(r"[0-9]{8}-[0-9]{6}\.[a-z.]+", file):
+                        raise ValueError("pick a backup to restore")
+                    job = dash.jobs.start(f"Restore {name} from {file}", ["backup", name, "--restore", file],
+                                          name, self.user)
+                    return self._json({"job": job.as_dict()}, 202)
+                return self._run_quick(["backup", name, "--daily" if body.get("on") else "--no-schedule"])
+            if action == "previews":
+                return self._run_quick(["previews", name, "on" if body.get("on") else "off"])
             if action == "limits":
                 args = ["limit", name]
                 for key in ("memory", "cpu"):
@@ -456,7 +585,7 @@ def make_handler(dash: Dashboard):
             action = args[0]
             proc = subprocess.run(
                 [os.sys.executable, "-m", "hoist", *args], capture_output=True, text=True,
-                env=dict(os.environ, NO_COLOR="1",
+                env=dict(os.environ, NO_COLOR="1", HOIST_ACTOR=self.user or "",
                          PYTHONPATH=str(jobs._PKG_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
                 timeout=60,
             )
@@ -528,7 +657,7 @@ def make_handler(dash: Dashboard):
                                            else Path(target).name)
             if dash.jobs.busy(app_name):
                 return self._error(409, f"{app_name} is already being deployed")
-            job = dash.jobs.start(f"Deploy {app_name}", args, app_name)
+            job = dash.jobs.start(f"Deploy {app_name}", args, app_name, self.user)
             return self._json({"job": job.as_dict(), "app": app_name}, 202)
 
     return Handler

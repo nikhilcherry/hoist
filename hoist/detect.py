@@ -13,6 +13,10 @@ from pathlib import Path
 STATIC_SERVE = "{python} -m http.server $PORT --bind 127.0.0.1"
 
 
+COMPOSE = "<compose>"
+DOCKERFILE = "<dockerfile>"  # placeholder; cli turns it into `docker compose up` for the app
+
+
 class DetectionError(Exception):
     pass
 
@@ -43,6 +47,24 @@ def port_in_use(port: int) -> bool:
     with socket.socket() as sock:
         sock.settimeout(0.4)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def http_answers(port: int, timeout: float = 2.0) -> bool:
+    """True once something on the port answers HTTP (any status code).
+
+    For containers the port opens as soon as docker-proxy starts, long
+    before the app inside is ready, so an open port proves nothing.
+    """
+    import http.client
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        conn.request("GET", "/", headers={"User-Agent": "hoist-health"})
+        conn.getresponse().read(1)
+        return True
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        conn.close()
 
 
 def lan_ip() -> str:
@@ -90,6 +112,13 @@ def detect_command(directory: Path) -> tuple[str, str]:
         if cmd:
             return cmd, "Procfile web process"
 
+    for name in ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"):
+        if (directory / name).is_file():
+            return COMPOSE, f"Compose stack ({name})"
+
+    if (directory / "Dockerfile").is_file():
+        return DOCKERFILE, "Dockerfile"
+
     pkg = directory / "package.json"
     if pkg.is_file():
         script = _npm_script(pkg)
@@ -109,11 +138,6 @@ def detect_command(directory: Path) -> tuple[str, str]:
     if (directory / "go.mod").is_file():
         return "go run .", "Go module"
 
-    if (directory / "docker-compose.yml").is_file() or (directory / "compose.yml").is_file():
-        raise DetectionError(
-            "found a compose file -- hoist manages plain processes, so start "
-            "compose yourself then run: hoist adopt <name> --port <port>"
-        )
 
     if (directory / "index.html").is_file():
         return STATIC_SERVE.format(python=python), "static site (index.html)"

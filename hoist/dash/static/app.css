@@ -582,3 +582,8 @@ a.feed-item:hover { background: var(--raised); }
 [data-part]:empty { display: none; }
 .unit { color: var(--muted); font-size: 0.62em; margin-left: 2px; font-weight: 400; letter-spacing: 0; }
 .t .unit { font-size: 12px; }
+
+.tpl { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-control); cursor: pointer; line-height: 20px; }
+.tpl:hover { background: var(--raised); }
+.tpl:has(input:checked) { border-color: var(--text); background: var(--raised); }
+.tpl input { margin-top: 3px; accent-color: var(--text); }

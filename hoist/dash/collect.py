@@ -20,7 +20,7 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
-from .. import config, detect, notify, service, source, tunnel
+from .. import config, containers, detect, notify, service, source, tunnel
 
 SAMPLE_EVERY = 3.0          # seconds between resource samples
 PROBE_EVERY = 30.0          # seconds between public URL checks
@@ -70,6 +70,21 @@ def _cpu_times() -> tuple[int, int]:
     return total - idle, total
 
 
+def net_bytes() -> tuple[int, int]:
+    """Total received/sent bytes on real interfaces (not loopback or Docker's)."""
+    rx = tx = 0
+    with open("/proc/net/dev") as fh:
+        for line in fh.readlines()[2:]:
+            name, _, data = line.partition(":")
+            name = name.strip()
+            if name == "lo" or name.startswith(("veth", "docker", "br-", "virbr")):
+                continue
+            fields = data.split()
+            rx += int(fields[0])
+            tx += int(fields[8])
+    return rx, tx
+
+
 def meminfo() -> dict[str, int]:
     info: dict[str, int] = {}
     with open("/proc/meminfo") as fh:
@@ -94,6 +109,44 @@ def _since(timestamp: str) -> float | None:
     except (ValueError, IndexError):
         return None
     return time.mktime(parsed)
+
+
+CGROUP = Path("/sys/fs/cgroup/system.slice")
+
+
+def container_usage(apps: dict) -> dict[str, dict]:
+    """Memory and CPU of the containers behind database and Compose apps.
+
+    Their systemd unit only holds the docker client, so its own figures are
+    the client's; the real numbers are in each container's cgroup.
+    """
+    wanted = {n for n, a in apps.items() if a.get("kind") in ("db", "compose")}
+    if not wanted or not containers.available():
+        return {}
+    listing = containers.run("ps", "--no-trunc", "--format",
+                             '{{.ID}}|{{.Names}}|{{.Label "com.docker.compose.project"}}', timeout=10)
+    usage: dict[str, dict] = {}
+    for line in listing.stdout.splitlines():
+        cid, _, rest = line.partition("|")
+        cname, _, project = rest.partition("|")
+        owner = None
+        for name in wanted:
+            if cname == containers.container_name(name) or project == containers.compose_project(name):
+                owner = name
+        if owner is None:
+            continue
+        scope = CGROUP / f"docker-{cid}.scope"
+        try:
+            memory = int((scope / "memory.current").read_text())
+            cpu_us = next(int(l.split()[1]) for l in (scope / "cpu.stat").read_text().splitlines()
+                          if l.startswith("usage_usec"))
+        except (OSError, ValueError, StopIteration):
+            continue
+        entry = usage.setdefault(owner, {"memory": 0, "cpu_ns": 0, "containers": 0})
+        entry["memory"] += memory
+        entry["cpu_ns"] += cpu_us * 1000
+        entry["containers"] += 1
+    return usage
 
 
 def routes() -> dict:
@@ -179,6 +232,7 @@ class Monitor(threading.Thread):
         self.app_series: dict[str, deque] = {}
         self.probes: dict[str, deque] = {}
         self._last_cpu: tuple[int, int] | None = None
+        self._last_net: tuple[int, int, float] | None = None
         self._last_unit_cpu: dict[str, tuple[int, float]] = {}
         self._last_probe = 0.0
         self._down: dict[str, int] = {}   # consecutive failed public checks per app
@@ -214,15 +268,26 @@ class Monitor(threading.Thread):
         if self._last_cpu and total > self._last_cpu[1]:
             cpu = 100.0 * (busy - self._last_cpu[0]) / (total - self._last_cpu[1])
         self._last_cpu = (busy, total)
+        rx, tx = net_bytes()
+        rx_rate = tx_rate = None
+        if self._last_net and now > self._last_net[2]:
+            span = now - self._last_net[2]
+            rx_rate = max(0, (rx - self._last_net[0]) / span)
+            tx_rate = max(0, (tx - self._last_net[1]) / span)
+        self._last_net = (rx, tx, now)
         mem = meminfo()
         mem_used = mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)
         disk = shutil.disk_usage(Path.home())
         load = os.getloadavg()
 
+        boxed = container_usage(apps)
         rows = []
         for name in sorted(apps):
             app = apps[name]
-            unit = props.get(service.unit_name(name), {})
+            unit = dict(props.get(service.unit_name(name), {}))
+            if name in boxed:  # report the containers, not the docker client
+                unit["MemoryCurrent"] = str(boxed[name]["memory"])
+                unit["CPUUsageNSec"] = str(boxed[name]["cpu_ns"])
             listening = detect.port_in_use(int(app["port"]))
             active = unit.get("ActiveState", "inactive")
             if app.get("adopted"):
@@ -252,8 +317,11 @@ class Monitor(threading.Thread):
 
             repo = app.get("repo")
             timer = props.get(f"{source.sync_unit_base(name)}.timer", {}) if repo else {}
-            url = (f"https://{app['hostname']}" if app.get("tunnel") and app.get("hostname")
-                   else f"http://{app.get('lan_ip', '127.0.0.1')}:{app['port']}")
+            if app.get("kind") == "db":
+                url = f"127.0.0.1:{app['port']}"
+            else:
+                url = (f"https://{app['hostname']}" if app.get("tunnel") and app.get("hostname")
+                       else f"http://{app.get('lan_ip', '127.0.0.1')}:{app['port']}")
             probes = list(self.probes.get(name, []))
             rows.append({
                 "name": name,
@@ -268,6 +336,14 @@ class Monitor(threading.Thread):
                 "cmd": app.get("cmd"),
                 "env_keys": sorted((app.get("env") or {}).keys()),
                 "limits": app.get("limits") or {},
+                "kind": app.get("kind") or "app",
+                "containers": boxed.get(name, {}).get("containers"),
+                "preview_of": app.get("preview_of"),
+                "dockerfile": bool(app.get("dockerfile")),
+                "template": app.get("template"),
+                "db": ({k: app["db"].get(k) for k in ("engine", "url", "env_var", "volume", "image", "database",
+                                                      "offsite", "daily_backup")}
+                       if app.get("kind") == "db" else None),
                 "created": app.get("created"),
                 "updated": app.get("updated"),
                 "pid": _int(unit.get("MainPID")) or None,
@@ -297,10 +373,13 @@ class Monitor(threading.Thread):
                 "disk_used": disk.used,
                 "uptime": uptime_seconds(),
                 "cloudflared": bool(tunnel.daemon_unit()),
+                "net_rx": round(rx_rate) if rx_rate is not None else None,
+                "net_tx": round(tx_rate) if tx_rate is not None else None,
             },
             "routes": routes(),
         }
-        self.system_series.append((round(now), snapshot["system"]["cpu"], mem_used))
+        self.system_series.append((round(now), snapshot["system"]["cpu"], mem_used,
+                                   snapshot["system"]["net_rx"], snapshot["system"]["net_tx"]))
         with self.lock:
             self.snapshot = snapshot
 
@@ -383,6 +462,8 @@ def _repo_summary(repo: dict, timer: dict) -> dict:
         "deployed": repo.get("deployed"),
         "failed_sha": repo.get("failed_sha"),
         "paused": bool(repo.get("paused")),
+        "previews": bool(repo.get("previews")),
+        "preview_failed": repo.get("preview_failed") or {},
         "build": repo.get("build", []),
         "watching": timer.get("ActiveState") == "active",
         "last": (repo.get("history") or [None])[0],

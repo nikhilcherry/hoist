@@ -86,7 +86,7 @@ def render_unit(app: dict) -> str:
     """Build the unit file text for `app`."""
     cmd = app["cmd"].replace("$PORT", str(app["port"]))
     exec_start = build_exec_start(cmd)
-    limits = app.get("limits") or {}
+    limits = {} if app.get("kind") in ("db", "compose") else (app.get("limits") or {})
     limit_lines = ""
     if limits.get("memory"):
         # MemoryHigh throttles first, so a leak slows down before it is killed.
@@ -96,6 +96,10 @@ def render_unit(app: dict) -> str:
     env_lines = "".join(
         env_line(k, v) for k, v in sorted(app.get("env", {}).items())
     )
+    # Container apps clear a leftover container first and get longer to stop.
+    hook_lines = "".join(f"ExecStartPre={line}\n" for line in app.get("pre", []))
+    if app.get("kind") in ("db", "compose"):
+        hook_lines += "TimeoutStopSec=45\n"
     return f"""[Unit]
 Description=hoist: {app['name']}
 Documentation=https://github.com/nikhilcherry/hoist
@@ -110,7 +114,7 @@ Type=simple
 WorkingDirectory={app['workdir']}
 Environment=PORT={app['port']}
 Environment=HOIST_APP={app['name']}
-{env_lines}{limit_lines}ExecStart={exec_start}
+{env_lines}{limit_lines}{hook_lines}ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2
 StandardOutput=journal
@@ -124,7 +128,12 @@ WantedBy=default.target
 def write_unit(app: dict) -> Path:
     UNIT_DIR.mkdir(parents=True, exist_ok=True)
     path = unit_path(app["name"])
-    path.write_text(render_unit(app))
+    # The unit carries the app's environment (API keys, database passwords),
+    # so it is readable by this user only.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(render_unit(app))
+    os.chmod(path, 0o600)
     _systemctl("daemon-reload")
     return path
 

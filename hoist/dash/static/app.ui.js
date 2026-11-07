@@ -102,11 +102,12 @@ function newAppDrawer() {
   let mode = "git", nameTouched = false;
   const box = openLayer(`<div class="drawer" aria-labelledby="na-title"><div class="drawer-head"><h2 id="na-title" style="flex:1">New app</h2><button class="btn ghost icon" data-x aria-label="Close">${ic("x")}</button></div>
     <form class="drawer-body" id="na-form" autocomplete="off">
-      <div class="seg" role="group" aria-label="Where the code comes from"><button type="button" data-mode="git" aria-pressed="true">${ic("git", 14, 'style="vertical-align:-2px"')} Git repository</button><button type="button" data-mode="folder" aria-pressed="false">${ic("folder", 14, 'style="vertical-align:-2px"')} Folder on ${esc(s.host || "this machine")}</button></div>
+      <div class="seg" role="group" aria-label="Where the code comes from"><button type="button" data-mode="git" aria-pressed="true">${ic("git", 14, 'style="vertical-align:-2px"')} Git repository</button><button type="button" data-mode="folder" aria-pressed="false">${ic("folder", 14, 'style="vertical-align:-2px"')} Folder on ${esc(s.host || "this machine")}</button><button type="button" data-mode="template" aria-pressed="false">${ic("box", 14, 'style="vertical-align:-2px"')} Ready-made app</button></div>
+      <div id="na-templates" class="hidden" role="radiogroup" aria-label="Ready-made apps" style="display:flex;flex-direction:column;gap:6px"></div>
       <div class="field"><label for="na-target" id="na-target-label">Repository</label><input class="input mono" id="na-target" placeholder="github.com/team/project" required autofocus spellcheck="false">
         <span class="hint" id="na-target-hint">Public or private: hoist uses this machine's git credentials. Every push to the branch redeploys.</span></div>
       <div class="row-2">
-        <div class="field"><label for="na-name">Name</label><input class="input" id="na-name" placeholder="project" pattern="[a-z0-9][a-z0-9\-]{0,39}" spellcheck="false"><span class="hint" id="na-url">${domain ? `project.${esc(domain)}` : ""}</span></div>
+        <div class="field"><label for="na-name">Name</label><input class="input" id="na-name" placeholder="project" pattern="[a-z0-9][a-z0-9\\-]{0,39}" spellcheck="false"><span class="hint" id="na-url">${domain ? `project.${esc(domain)}` : ""}</span></div>
         <div class="field" id="na-branch-f"><label for="na-branch">Branch</label><input class="input mono" id="na-branch" placeholder="default branch" spellcheck="false"></div>
       </div>
       <details><summary style="cursor:pointer;font-weight:500">Build and start commands</summary>
@@ -133,8 +134,21 @@ function newAppDrawer() {
   const updUrl = () => { const n = nameIn.value || guess(target.value) || "name"; $("#na-url", box).textContent = pub && domain ? `${n}.${domain}` : "LAN address + QR"; };
   target.addEventListener("input", () => { if (!nameTouched) nameIn.value = guess(target.value); updUrl(); });
   nameIn.addEventListener("input", () => { nameTouched = true; updUrl(); });
+  let tpl = null;
+  const tplBox = $("#na-templates", box);
+  api("/api/templates").then((r) => {
+    tplBox.innerHTML = r.templates.map((x) => `<label class="tpl"><input type="radio" name="tpl" value="${x.id}"><span><strong>${esc(x.label)}</strong><span class="muted"> — ${esc(x.about)}</span><br><span class="faint mono" style="font-size:12px">${esc(x.image)}</span></span></label>`).join("") +
+      (r.docker ? "" : `<div class="notice bad">Docker is not running on this machine, so ready-made apps cannot start.</div>`);
+    $$("input[name=tpl]", tplBox).forEach((i) => i.addEventListener("change", () => { tpl = i.value; if (!nameTouched) { nameIn.value = tpl; updUrl(); } }));
+  }).catch(() => {});
   $$("[data-mode]", box).forEach((b) => b.addEventListener("click", () => {
     mode = b.dataset.mode; $$("[data-mode]", box).forEach((x) => x.setAttribute("aria-pressed", x === b));
+    const isTpl = mode === "template";
+    tplBox.classList.toggle("hidden", !isTpl);
+    target.closest(".field").classList.toggle("hidden", isTpl); target.required = !isTpl;
+    $("details", box).classList.toggle("hidden", isTpl);
+    $("#na-env", box).closest(".field").classList.toggle("hidden", isTpl);
+    if (isTpl) { $("#na-branch-f", box).classList.add("hidden"); return; }
     $("#na-target-label", box).textContent = mode === "git" ? "Repository" : "Folder";
     target.placeholder = mode === "git" ? "github.com/team/project" : "/home/you/Projects/app";
     $("#na-target-hint", box).textContent = mode === "git" ? "Public or private: hoist uses this machine's git credentials. Every push to the branch redeploys." : "Runs straight from this folder. Edits show up after a restart; there is no deploy history.";
@@ -149,6 +163,21 @@ function newAppDrawer() {
   $("#na-form", box).addEventListener("submit", async (e) => {
     e.preventDefault();
     const err = $("#na-err", box); err.textContent = "";
+    if (mode === "template") {
+      if (!tpl) { err.textContent = "Pick an app"; return; }
+      const goBtn = $("#na-go", box); goBtn.disabled = true; goBtn.innerHTML = `${ic("refresh", 16, 'class="spin"')}Starting`;
+      try {
+        const r = await post("/api/templates", { id: tpl, name: nameIn.value.trim(), local: !pub });
+        $("#na-job", box).classList.remove("hidden");
+        $$("#na-form > :not(#na-job):not(#na-err)", box).forEach((el) => el.classList.add("hidden"));
+        streamJob(r.job, $("#na-term", box), (j) => {
+          goBtn.disabled = false; goBtn.type = "button";
+          if (j.status === "ok") { goBtn.innerHTML = `Open ${esc(r.app)}`; goBtn.onclick = () => { closeLayer(); window.go(`/apps/${r.app}`); }; toast(`${r.app} is live`); }
+          else goBtn.innerHTML = "Failed — see the log";
+        });
+      } catch (ex) { err.textContent = ex.message; goBtn.disabled = false; goBtn.innerHTML = `${ic("arrow")}Deploy`; }
+      return;
+    }
     const env = parseDotenv($("#na-env", box).value);
     const body = { target: target.value.trim(), name: nameIn.value.trim(), branch: $("#na-branch", box).value.trim(), build: $("#na-build", box).value.trim(), cmd: $("#na-cmd", box).value.trim(), env, local: !pub };
     if (mode === "git" && !/^(https?:\/\/|git@|ssh:\/\/|file:\/\/|github\.com\/|gitlab\.com\/|bitbucket\.org\/|codeberg\.org\/)/.test(body.target)) { err.textContent = "That does not look like a git URL — try github.com/team/project"; return; }
@@ -176,6 +205,52 @@ function newAppDrawer() {
 }
 window.go = go;
 
+// ── new database ────────────────────────────────────────────────────────────
+
+function newDbDialog(engine = "postgres") {
+  let pick = engine || "postgres";
+  const taken = new Set((store.state?.apps || []).map((a) => a.name));
+  const suggest = (e) => { let n = e === "postgres" ? "db" : e; let i = 2; while (taken.has(n)) n = `${e}-${i++}`; return n; };
+  const box = openLayer(`<div class="dialog" style="width:min(520px,calc(100vw - 32px))"><form class="body" id="db-form">
+    <h2>New database</h2>
+    <div class="seg" role="group" aria-label="Engine">${Object.entries(ENGINE_LABEL).map(([k, l]) => `<button type="button" data-engine="${k}" aria-pressed="${k === pick}">${l}</button>`).join("")}</div>
+    <div class="field"><label for="db-name">Name</label><input class="input" id="db-name" value="${esc(suggest(pick))}" pattern="[a-z0-9][a-z0-9\\-]{0,39}" required spellcheck="false" autofocus></div>
+    <p class="muted" style="margin:0" id="db-note"></p>
+    <span class="err" id="db-err" role="alert"></span>
+    <div class="term hidden" id="db-term" style="height:180px"></div>
+  </form><div class="foot"><button class="btn" data-x>Cancel</button><button class="btn primary" form="db-form" type="submit" id="db-go">${ic("db")}Start</button></div></div>`);
+  const note = { postgres: "postgres:16-alpine · DATABASE_URL", mysql: "mysql:8.4 · DATABASE_URL", mariadb: "mariadb:11 · DATABASE_URL", redis: "redis:7-alpine with a password · REDIS_URL", mongo: "mongo:7 · MONGODB_URL" };
+  const paint = () => { $("#db-note", box).textContent = `${note[pick]}. Its own volume and a generated password; only this machine can reach it.`; };
+  paint();
+  $$("[data-engine]", box).forEach((b) => b.addEventListener("click", () => {
+    const old = suggest(pick); pick = b.dataset.engine; $$("[data-engine]", box).forEach((x) => x.setAttribute("aria-pressed", x === b));
+    if ($("#db-name", box).value === old) $("#db-name", box).value = suggest(pick); paint();
+  }));
+  $("[data-x]", box).onclick = () => closeLayer();
+  $("#db-form", box).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("#db-go", box); btn.disabled = true; btn.innerHTML = `${ic("refresh", 16, 'class="spin"')}Starting`;
+    try {
+      const r = await post("/api/databases", { engine: pick, name: $("#db-name", box).value.trim() });
+      $("#db-term", box).classList.remove("hidden");
+      streamJob(r.job, $("#db-term", box), (j) => {
+        if (j.status === "ok") { btn.disabled = false; btn.innerHTML = `Open ${esc(r.app)}`; btn.type = "button"; btn.onclick = () => { closeLayer(); go(`/apps/${r.app}`); }; toast(`${r.app} is running`); }
+        else { btn.disabled = false; btn.innerHTML = "Try again"; }
+      });
+    } catch (err) { $("#db-err", box).textContent = err.message; btn.disabled = false; btn.innerHTML = `${ic("db")}Start`; }
+  });
+}
+
+document.addEventListener("submit", async (e) => {
+  if (e.target.id !== "link-form") return;
+  e.preventDefault();
+  const route = current(); const db = route.params[0];
+  const target = $("#link-app").value, v = $("#link-var").value.trim();
+  if (!target) return;
+  try { await post(`/api/apps/${db}/link`, { app: target, var: v }); toast(`${target} now has ${v} and was restarted`); poll(); }
+  catch (err) { toast(err.message, true); }
+});
+
 // ── QR full screen ──────────────────────────────────────────────────────────
 
 function qrDialog(name) {
@@ -198,6 +273,9 @@ function palette() {
     { g: "Go to", label: "Deployments", icon: "deploys", run: () => go("/deployments") },
     { g: "Go to", label: "Routes", icon: "routes", run: () => go("/routes") },
     { g: "Go to", label: "Machine", icon: "machine", run: () => go("/machine") },
+    { g: "Go to", label: "Databases", icon: "db", run: () => go("/databases") },
+    { g: "Go to", label: "Team", icon: "team", run: () => go("/team") },
+    { g: "Action", label: "New database", icon: "db", run: () => newDbDialog() },
     { g: "Action", label: "New app", icon: "plus", hint: "N", run: () => newAppDrawer() },
     ...apps.flatMap((a) => [
       { g: "App", label: a.name, icon: "box", hint: STATUS_WORDS[a.status], run: () => go(`/apps/${a.name}`) },
@@ -243,6 +321,38 @@ function toggleTheme() {
 async function doAction(action, name, el) {
   try {
     if (action === "new-app") return newAppDrawer();
+    if (action === "new-db") return newDbDialog(el?.dataset.engine);
+    if (action === "reveal-db") {
+      const code = $("#db-url"); const show = code.dataset.masked === "1";
+      code.textContent = show ? el.dataset.url : el.dataset.masked; code.dataset.masked = show ? "0" : "1";
+      el.innerHTML = `${ic(show ? "eyeoff" : "eye", 14)}${show ? "Hide" : "Show"}`;
+      $('[data-part="route"]').dataset.hold = show ? "1" : "";
+      return;
+    }
+    if (action === "backup") { const r = await post(`/api/apps/${name}/backup`); return jobDrawer(r.job, { title: `Backing up ${name}` }); }
+    if (action === "restore") {
+      const ok = await confirmDialog({ title: `Restore ${name} from ${el.dataset.file}?`, body: "Everything written since that backup is replaced. Take a fresh backup first if you might want it back.", ok: "Restore", danger: true });
+      if (!ok) return;
+      const r = await post(`/api/apps/${name}/restore`, { file: el.dataset.file });
+      return jobDrawer(r.job, { title: `Restoring ${name}` });
+    }
+    if (action === "backup-schedule") {
+      const on = el.dataset.on === "1";
+      await post(`/api/apps/${name}/backup-schedule`, { on });
+      toast(on ? `${name} is backed up every day` : `Daily backups of ${name} off`); return poll();
+    }
+    if (action === "previews") {
+      const on = el.dataset.on === "1";
+      await post(`/api/apps/${name}/previews`, { on });
+      toast(on ? `Every branch of ${name} now gets a preview` : `Branch previews off for ${name}`);
+      return poll();
+    }
+    if (action === "remove-user") {
+      const who = el.dataset.user;
+      const ok = await confirmDialog({ title: `Remove ${who}?`, body: `${esc(who)}'s link stops working at once. Their entries stay in the audit log.`, ok: "Remove", danger: true });
+      if (!ok) return;
+      await post(`/api/team/${who}/remove`); toast(`${who} removed`); return poll();
+    }
     if (action === "theme") return toggleTheme();
     if (action === "logout") { await post("/api/logout"); location.replace("/"); return; }
     if (action === "copy") return copyText(el.dataset.text);
@@ -272,7 +382,9 @@ async function doAction(action, name, el) {
       const ok = await confirmDialog({ title: `Take down ${name}?`, danger: true, ok: "Take down", typeToConfirm: name,
         body: `The process stops and <strong>${esc(a?.public ? a.hostname : a?.url || name)}</strong> stops answering. ${a?.repo ? "Its watcher and checkout are removed. " : ""}The DNS record and your code are left alone.` });
       if (!ok) return;
-      const r = await post(`/api/apps/${name}/delete`);
+      let purge = false;
+      if (a?.kind === "db") purge = await confirmDialog({ title: `Delete ${name}'s data too?`, body: `The volume <span class="mono">${esc(a.db?.volume)}</span> holds every row. Keep it and a database with the same name picks it up again; delete it and it is gone for good.`, ok: "Delete the data", danger: true });
+      const r = await post(`/api/apps/${name}/delete`, { purge });
       jobDrawer(r.job, { title: `Taking down ${name}` });
       if (current().name === "app") go("/apps");
       return;
@@ -299,7 +411,10 @@ async function doAction(action, name, el) {
 
 function appMenu(anchor, name) {
   const a = appByName(name); if (!a) return;
-  const items = [
+  const items = a.kind === "db" ? [
+    { label: "Copy connection URL", icon: "copy", run: () => copyText(a.db?.url || "") },
+    "-",
+  ] : [
     { label: "Open", icon: "ext", run: () => window.open(a.url, "_blank", "noopener") },
     { label: "Copy URL", icon: "copy", run: () => copyText(a.url) },
     { label: "QR code", icon: "qr", run: () => qrDialog(name) },

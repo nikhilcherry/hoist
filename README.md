@@ -115,6 +115,12 @@ Only want a LAN URL? Skip cloudflared entirely and use `--local`.
 | `hoist stop / start <name>` | Stop an app's process, keeping its URL and config. |
 | `hoist sync <name> --to <sha>` | Roll back to an earlier commit (pauses auto-deploy). |
 | `hoist limit <name> --memory 512M --cpu 50%` | Cap an app's resources. |
+| `hoist db postgres --name votes` | A database in Docker: PostgreSQL, MySQL, MariaDB, Redis or MongoDB. |
+| `hoist link <db> <app>` | Put the database's URL in the app's environment and restart it. |
+| `hoist backup <db> [--daily] [--restore F] [--offsite gdrive:hoist]` | Back up, schedule, restore, copy off-site. |
+| `hoist template <id>` | One-click apps: Uptime Kuma, n8n, ntfy, Excalidraw, PocketBase, Metabase, Open WebUI. |
+| `hoist previews <name> on` | Every branch gets its own preview app, removed when the branch is deleted. |
+| `hoist exec <name> -- <command>` | Run one command in the app's folder, container or stack. |
 | `hoist notify <webhook>` | Deploy, failed-build and downtime alerts to Discord, Slack, ntfy or Telegram. |
 | `hoist doctor` | Check systemd, cloudflared, tunnel, domain, permissions. |
 
@@ -191,7 +197,15 @@ Everything the CLI does, in one place, for the whole team:
 - **Routes** (every hostname on the tunnel, hand-written ones too, with a one-hour
   uptime strip), **Machine** (CPU, memory, disk, the `hoist doctor` checks with
   copyable fixes), **notifications** and a QR code for every app.
+- **Databases** with a connection card, one-click linking, daily backups,
+  restore and download; **ready-made apps** from the new-app drawer;
+  **branch previews**; a **console** that runs one command in the app.
+- **Team**: everyone gets their own sign-in link (`hoist dash --add-user shreyas`),
+  and an audit log records who deployed, rolled back or changed what.
 - Command palette on <kbd>Ctrl</kbd> <kbd>K</kbd>, <kbd>N</kbd> for a new app, light and dark.
+
+How it stacks up against Dokploy, feature by feature and measured on the same
+laptop: [docs/vs-dokploy.md](docs/vs-dokploy.md).
 
 Zero dependencies like the rest of hoist: a standard-library server and one page
 of plain JavaScript, fonts bundled so it works with no internet. A token guards
@@ -205,6 +219,15 @@ and only then made live by swapping a `current` symlink and restarting. The
 running process keeps serving its own release the whole time, so a push that
 fails to build — or deletes files halfway — never touches it. The last four
 releases are kept, which is why rolling back to one of them needs no rebuild.
+
+### Docker apps
+
+A repo with a `compose.yml` runs as a Compose stack and one with only a
+`Dockerfile` is wrapped in one; both are built before they go live, like
+everything else. Their CPU and memory are read from the containers' own
+cgroups, and their limits go to Docker. Databases (`hoist db`) and templates
+(`hoist template`) are Docker apps too, so they get logs, restart, limits and
+the dashboard for free.
 
 ## What it detects
 

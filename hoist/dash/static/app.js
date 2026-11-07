@@ -52,6 +52,10 @@ const ICONS = {
   phone: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/>',
   arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   dot: '<circle cx="12" cy="12" r="4"/>',
+  db: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
+  team: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c.6-3.4 3-5.4 6-5.4s5.4 2 6 5.4"/><circle cx="17" cy="9" r="2.4"/><path d="M16.5 14.3c2.4.2 4 1.8 4.5 4.7"/>',
+  branch: '<circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="7" r="2.2"/><path d="M6 7.2v9.6M18 9.2c0 4-6 3-11 7.5"/>',
+  link: '<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/>',
 };
 const ic = (name, size = 16, extra = "") =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ${extra}>${ICONS[name] || ""}</svg>`;
@@ -95,6 +99,7 @@ const fmt = {
   message(commit) { const s = fmt.subject(commit); const i = s.indexOf(": "); return i > -1 ? s.slice(i + 2) : s; },
 };
 
+const ENGINE_LABEL = { postgres: "PostgreSQL", mysql: "MySQL", mariadb: "MariaDB", redis: "Redis", mongo: "MongoDB" };
 const STATUS_WORDS = { up: "Live", down: "Down", starting: "Starting", failed: "Crashed", stopped: "Stopped", inactive: "Inactive" };
 const statusPill = (s) => `<span class="pill ${esc(s)}"><span class="d"></span>${STATUS_WORDS[s] || esc(s)}</span>`;
 
@@ -126,10 +131,15 @@ async function poll() {
     store.state = await api("/api/state");
     store.lastOk = Date.now(); store.failing = false;
     const route = current();
-    if (route.name === "app") store.detail[route.params[0]] = await api(`/api/apps/${route.params[0]}`).catch(() => null);
+    if (route.name === "app") {
+      const detail = await api(`/api/apps/${route.params[0]}`).catch(() => null);
+      if (detail?.row?.kind === "db") detail.backups = await api(`/api/apps/${route.params[0]}/backups`).catch(() => null);
+      store.detail[route.params[0]] = detail;
+    }
     if (route.name === "overview" || route.name === "machine") store.metrics = await api("/api/metrics");
     if (route.name === "deployments" || route.name === "overview") store.deployments = (await api("/api/deployments")).deployments;
     if (route.name === "routes") store.routes = (await api("/api/routes")).rules;
+    if (route.name === "team") store.team = await api("/api/team");
   } catch (e) {
     if (e.message !== "signed out") store.failing = true;
   }
@@ -156,10 +166,12 @@ setInterval(() => {
 const ROUTES = [
   ["overview", /^\/$/],
   ["apps", /^\/apps\/?$/],
-  ["app", /^\/apps\/([a-z0-9-]+)(?:\/(deployments|logs|environment|settings))?\/?$/],
+  ["app", /^\/apps\/([a-z0-9-]+)(?:\/(deployments|logs|console|environment|settings))?\/?$/],
   ["deployments", /^\/deployments\/?$/],
   ["routes", /^\/routes\/?$/],
   ["machine", /^\/machine\/?$/],
+  ["databases", /^\/databases\/?$/],
+  ["team", /^\/team\/?$/],
 ];
 function current() {
   for (const [name, re] of ROUTES) { const m = location.pathname.match(re); if (m) return { name, params: m.slice(1) }; }
@@ -198,7 +210,7 @@ function mount() {
   $("#sheet").scrollTop = 0;
   paintChrome();
   if (view.mount) view.mount();
-  if (route.name === "app" || route.name === "overview" || route.name === "deployments" || route.name === "routes" || route.name === "machine") poll();
+  if (["app", "overview", "deployments", "routes", "machine", "databases", "team"].includes(route.name)) poll();
 }
 
 function renderPart(key, force = false) {
@@ -223,19 +235,23 @@ const part = (key, cls = "") => `<div data-part="${key}" class="${cls}"></div>`;
 function paintChrome() {
   const s = store.state; const route = current();
   $("#brand-host").textContent = s?.host || "";
-  const apps = s?.apps || [];
+  const all = s?.apps || [];
+  const apps = all.filter((a) => a.kind !== "db");
+  const dbs = all.filter((a) => a.kind === "db");
   const broken = apps.filter(isBroken).length;
   const navItem = (href, label, icon, active, count = "") =>
     `<a href="${href}" data-link ${active ? 'aria-current="page"' : ""}>${ic(icon)}<span>${label}</span>${count}</a>`;
   const appLinks = apps.slice(0, 12).map((a) =>
     `<a class="app-link" href="/apps/${a.name}" data-link ${route.name === "app" && route.params[0] === a.name ? 'aria-current="page"' : ""} title="${esc(a.name)} — ${STATUS_WORDS[a.status] || a.status}">
-      <span class="dot ${a.status}"></span><span class="label">${esc(a.name)}</span></a>`).join("");
+      <span class="dot ${a.status}"></span><span class="label">${a.preview_of ? '<span class="faint">↳ </span>' : ""}${esc(a.name)}</span></a>`).join("");
   $("#nav").innerHTML =
     navItem("/", "Overview", "overview", route.name === "overview") +
     navItem("/apps", "Apps", "apps", route.name === "apps", broken ? `<span class="count bad" title="${broken} not answering">${broken} down</span>` : `<span class="count">${apps.length || ""}</span>`) +
     navItem("/deployments", "Deployments", "deploys", route.name === "deployments") +
     navItem("/routes", "Routes", "routes", route.name === "routes") +
+    navItem("/databases", "Databases", "db", route.name === "databases", dbs.length ? `<span class="count">${dbs.length}</span>` : "") +
     navItem("/machine", "Machine", "machine", route.name === "machine") +
+    navItem("/team", "Team", "team", route.name === "team") +
     (apps.length ? `<div class="nav-group">Apps</div>${appLinks}` : "");
   const dark = document.documentElement.dataset.theme === "dark";
   $("#sidebar-foot").innerHTML = `
@@ -244,7 +260,7 @@ function paintChrome() {
       <a href="#" data-action="theme">${ic(dark ? "sun" : "moon")}<span>${dark ? "Light" : "Dark"} theme</span></a>
       <a href="#" data-action="logout">${ic("logout")}<span>Sign out</span></a>
     </div>
-    <div class="meta">hoist ${esc(s?.version || "")}${s?.domain ? ` · ${esc(s.domain)}` : ""}</div>`;
+    <div class="meta">${s?.me ? `Signed in as ${esc(s.me)} · ` : ""}hoist ${esc(s?.version || "")}</div>`;
   $("#crumbs").innerHTML = (view?.crumbs || []).map(([label, href], i, all) =>
     i === all.length - 1 ? `<span class="here">${esc(label)}</span>` : `<a href="${href}" data-link>${esc(label)}</a><span class="sep">/</span>`).join("");
   $("#search-btn").innerHTML = `${ic("search")}<span>Search apps and actions</span><kbd>Ctrl K</kbd>`;
@@ -274,10 +290,12 @@ function probeText(p) {
   return `<span ${p.up ? "" : 'style="color:var(--negative)"'}>${p.code}</span> <span class="muted">·</span> ${fmt.ms(p.ms)}`;
 }
 function sourceCell(a) {
+  if (a.kind === "db") return `<div class="nowrap">${ic("db", 14, 'style="vertical-align:-2px;color:var(--muted)"')} ${esc(ENGINE_LABEL[a.db?.engine] || a.db?.engine)}</div><div class="sub">${esc(a.db?.image || "")}</div>`;
   if (a.repo) {
-    return `<div class="nowrap">${ic("git", 14, 'style="vertical-align:-2px;color:var(--muted)"')} ${esc(a.repo.branch)} <span class="sha">${fmt.sha(a.repo.sha)}</span>${a.repo.paused ? ' <span class="pill paused">Paused</span>' : ""}${a.repo.failed_sha ? ' <span class="pill failed">Build failed</span>' : ""}</div>
-            <div class="sub">${esc(fmt.message(a.repo.commit))}</div>`;
+    return `<div class="nowrap">${ic("git", 14, 'style="vertical-align:-2px;color:var(--muted)"')} ${a.dockerfile ? "Dockerfile · " : a.kind === "compose" ? "Compose · " : ""}${esc(a.repo.branch)} <span class="sha">${fmt.sha(a.repo.sha)}</span>${a.preview_of ? ' <span class="pill">Preview</span>' : ""}${a.repo.paused ? ' <span class="pill paused">Paused</span>' : ""}${a.repo.failed_sha ? ' <span class="pill failed">Build failed</span>' : ""}</div>
+            <div class="sub">${a.preview_of ? `Preview of ${esc(a.preview_of)} · ` : ""}${esc(fmt.message(a.repo.commit))}</div>`;
   }
+  if (a.template) return `<div class="nowrap">${ic("box", 14, 'style="vertical-align:-2px;color:var(--muted)"')} Ready-made · ${esc(a.template)}</div><div class="sub">Docker image, data in a volume</div>`;
   if (a.adopted) return `<div class="nowrap">${ic("plug", 14, 'style="vertical-align:-2px;color:var(--muted)"')} Existing process</div><div class="sub">hoist only routes to it</div>`;
   return `<div class="nowrap">${ic("folder", 14, 'style="vertical-align:-2px;color:var(--muted)"')} Local folder</div><div class="sub">${esc(a.workdir || "")}</div>`;
 }
