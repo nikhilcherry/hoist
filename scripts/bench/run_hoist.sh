@@ -28,7 +28,7 @@ trigger() {  # trigger VERSION [fail]  -> POST a signed GitHub-style webhook, lo
   curl -s -o /dev/null -X POST "$DASH/hooks/bench" -H "X-Hub-Signature-256: sha256=$sig" -H "X-GitHub-Event: push" -d "$body"
   echo "$t0 $1 ${2:-}" >> "$W/hoist.triggers"
 }
-wait_live() { for _ in $(seq 1 1200); do grep -q " 200 $1\$" "$W/hoist.poll" && return 0; sleep 0.1; done; return 1; }
+wait_live() { for _ in $(seq 1 1200); do grep -q " 200 $1 " "$W/hoist.poll" && return 0; sleep 0.1; done; return 1; }
 
 sleep 2
 for i in 1 2 3 4 5; do push "h$i"; trigger "h$i"; wait_live "h$i" || echo "h$i never went live"; sleep 4; done

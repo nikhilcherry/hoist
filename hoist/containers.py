@@ -242,8 +242,27 @@ def dockerfile_port(directory: Path) -> int:
 GENERATED_COMPOSE = "compose.hoist.yml"
 
 
-def ensure_dockerfile_compose(directory: Path) -> Path:
-    """Wrap a lone Dockerfile in a one-service compose file hoist can run."""
+def _env_lines(inner: int, env_keys) -> str:
+    """The service's environment: PORT, plus each of the app's own variables.
+
+    The values are not written into the file; each is `${KEY:-}`, filled in from
+    the environment of whatever runs compose (the app's systemd unit), so a
+    secret never lands in a file on disk and editing it in the dashboard works.
+    """
+    lines = f'    environment:\n      PORT: "{inner}"\n'
+    for key in sorted(set(env_keys or ())):
+        if key != "PORT":
+            lines += f"      {key}: ${{{key}:-}}\n"
+    return lines
+
+
+def ensure_dockerfile_compose(directory: Path, env_keys=()) -> Path:
+    """Wrap a lone Dockerfile in a one-service compose file hoist can run.
+
+    No `ports:` on purpose: `hoist front` owns the public port and forwards to
+    the container, which is what lets a redeploy start the new container beside
+    the old one with no host port to fight over.
+    """
     inner = dockerfile_port(directory)
     path = directory / GENERATED_COMPOSE
     path.write_text("# written by hoist for a repo with only a Dockerfile\n"
@@ -251,9 +270,7 @@ def ensure_dockerfile_compose(directory: Path) -> Path:
                     # An init process as PID 1 passes the stop signal on. Without it a
                     # plain `python`/`node` server ignores SIGTERM and every stop (so
                     # every redeploy) waits out Docker's 10 second grace period.
-                    "    init: true\n"
-                    f'    ports: ["127.0.0.1:${{PORT}}:{inner}"]\n'
-                    f'    environment:\n      PORT: "{inner}"\n')
+                    "    init: true\n" + _env_lines(inner, env_keys))
     return path
 
 
@@ -284,15 +301,28 @@ def buildpack_build_step(tool: str, app: str) -> str:
     return f"pack build {shlex.quote(buildpack_image(app))} --builder {PACK_BUILDER}"
 
 
-def ensure_buildpack_compose(directory: Path, app: str) -> Path:
+def ensure_buildpack_compose(directory: Path, app: str, env_keys=()) -> Path:
     """A one-service compose file around the image the buildpack produces."""
     path = directory / GENERATED_COMPOSE
     path.write_text("# written by hoist for a project built with a buildpack\n"
                     f"services:\n  app:\n    image: {buildpack_image(app)}\n"
-                    "    init: true\n"
-                    f'    ports: ["127.0.0.1:${{PORT}}:{BUILDPACK_INNER_PORT}"]\n'
-                    f'    environment:\n      PORT: "{BUILDPACK_INNER_PORT}"\n')
+                    "    init: true\n" + _env_lines(BUILDPACK_INNER_PORT, env_keys))
     return path
+
+
+def refresh_generated_compose(app: dict) -> bool:
+    """Rewrite a Dockerfile or buildpack app's generated compose file so its environment
+    lists the app's current variables. Call after the app's env changes, before the restart
+    that recreates the container. Returns False for apps that have no generated file."""
+    if not (app.get("dockerfile") or app.get("buildpack")):
+        return False
+    directory = Path(app["workdir"]).resolve()
+    keys = list((app.get("env") or {}).keys())
+    if app.get("buildpack"):
+        ensure_buildpack_compose(directory, app["name"], keys)
+    else:
+        ensure_dockerfile_compose(directory, keys)
+    return True
 
 
 def compose_down(app: str, purge: bool = False) -> list[str]:

@@ -1,11 +1,12 @@
-version     outcome                     trigger→live   longest gap
-h1          live                             11.13 s        0.65 s
-h2          live                              1.88 s        1.45 s
-h3          live                              1.95 s        1.40 s
-h4          live                              1.12 s        0.65 s
-h5          live                              1.12 s        0.70 s
-hbroken     old version kept serving               —        0.00 s
-hfix        live                              1.91 s        1.45 s
+version     outcome                     trigger→live   longest gap  slowest req
+h1          live                              1.41 s        0.00 s       0.01 s
+h2          live                              1.61 s        0.00 s       0.01 s
+h3          live                              1.60 s        0.00 s       0.01 s
+h4          live                              1.44 s        0.00 s       0.01 s
+h5          live                              1.64 s        0.00 s       0.01 s
+hbroken     old version kept serving               —        0.00 s       0.01 s
+hfix        live                              1.48 s        0.00 s       0.00 s
 
-successful deploys: 6   median 1.90 s   min 1.12 s   max 11.13 s
-downtime during deploy (longest gap): median 1.05 s   max 1.45 s
+successful deploys: 6   median 1.54 s   min 1.41 s   max 1.64 s
+downtime during deploy (longest gap): median 0.00 s   max 0.00 s
+slowest single request during a deploy: median 0.01 s   max 0.01 s

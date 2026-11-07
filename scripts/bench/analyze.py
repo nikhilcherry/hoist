@@ -20,16 +20,16 @@ def load(path: str):
     rows = []
     for line in open(path):
         parts = line.split()
-        if len(parts) == 3:
-            rows.append((float(parts[0]), int(parts[1]), parts[2]))
+        if len(parts) in (3, 4):  # older logs have no latency column
+            rows.append((float(parts[0]), int(parts[1]), parts[2], float(parts[3]) if len(parts) == 4 else 0.0))
     return rows
 
 
 def main() -> int:
     rows = load(sys.argv[1])
     triggers = [line.split() for line in open(sys.argv[2]) if line.strip()]
-    live, gaps = [], []
-    print(f"{'version':<12}{'outcome':<26}{'trigger→live':>14}{'longest gap':>14}")
+    live, gaps, slow = [], [], []
+    print(f"{'version':<12}{'outcome':<26}{'trigger→live':>14}{'longest gap':>14}{'slowest req':>13}")
     for i, trig in enumerate(triggers):
         t0, version = float(trig[0]), trig[1]
         expect_fail = len(trig) > 2 and trig[2] == "fail"
@@ -38,7 +38,7 @@ def main() -> int:
         seen = next((r[0] for r in window if r[2] == version and r[1] == 200), None)
         # longest run of non-200 responses in the window, from request timestamps
         gap, run_start, prev = 0.0, None, None
-        for t, status, _ in window:
+        for t, status, _, _lat in window:
             if status != 200:
                 run_start = run_start if run_start is not None else (prev if prev is not None else t)
             elif run_start is not None:
@@ -47,19 +47,22 @@ def main() -> int:
             prev = t
         if run_start is not None:
             gap = max(gap, window[-1][0] - run_start)
+        slowest = max((r[3] for r in window), default=0.0) / 1000
+        slow.append(slowest)
         if expect_fail:
             outcome = "old version kept serving" if seen is None and gap < 0.5 else "BROKE the live app"
-            print(f"{version:<12}{outcome:<26}{'—':>14}{gap:>12.2f} s")
+            print(f"{version:<12}{outcome:<26}{'—':>14}{gap:>12.2f} s{slowest:>11.2f} s")
         elif seen is None:
-            print(f"{version:<12}{'never went live':<26}{'—':>14}{gap:>12.2f} s")
+            print(f"{version:<12}{'never went live':<26}{'—':>14}{gap:>12.2f} s{slowest:>11.2f} s")
         else:
             live.append(seen - t0)
             gaps.append(gap)
-            print(f"{version:<12}{'live':<26}{seen - t0:>12.2f} s{gap:>12.2f} s")
+            print(f"{version:<12}{'live':<26}{seen - t0:>12.2f} s{gap:>12.2f} s{slowest:>11.2f} s")
     if live:
         print(f"\nsuccessful deploys: {len(live)}   median {statistics.median(live):.2f} s   "
               f"min {min(live):.2f} s   max {max(live):.2f} s")
         print(f"downtime during deploy (longest gap): median {statistics.median(gaps):.2f} s   max {max(gaps):.2f} s")
+        print(f"slowest single request during a deploy: median {statistics.median(slow):.2f} s   max {max(slow):.2f} s")
     return 0
 
 

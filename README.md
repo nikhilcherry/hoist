@@ -223,6 +223,10 @@ tunnel every request arrives from 127.0.0.1.
 
 ### How a deploy can never take the demo down
 
+Dockerfile and buildpack apps also redeploy with **no downtime at all**: the new
+container starts beside the old one behind a small supervisor, traffic moves when
+it answers, and a version that never answers is discarded.
+
 Every deploy is exported from git into its own release directory, built there,
 and only then made live by swapping a `current` symlink and restarting. The
 running process keeps serving its own release the whole time, so a push that

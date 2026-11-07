@@ -23,10 +23,13 @@ from pathlib import Path
 from .. import config, containers, detect, notify, service, source, tunnel
 
 SAMPLE_EVERY = 3.0          # seconds between resource samples while someone is watching
-IDLE_EVERY = 15.0           # ...and when nobody has the dashboard open (each sample spawns
+IDLE_EVERY = 30.0           # ...and when nobody has the dashboard open (each sample spawns
                             # systemctl and docker, which was most of the idle CPU)
 WATCHING_FOR = 30.0         # a client counts as watching for this long after its last request
-PROBE_EVERY = 30.0          # seconds between public URL checks
+PROBE_EVERY = 30.0          # seconds between public URL checks while they are being used:
+                            # someone is watching, or a notification webhook needs downtime alerts.
+                            # Otherwise nothing reads the results, so they are not taken (they
+                            # were most of the idle CPU).
 KEEP_SAMPLES = 1200         # one hour at SAMPLE_EVERY
 KEEP_PROBES = 120           # one hour at PROBE_EVERY
 
@@ -249,15 +252,23 @@ class Monitor(threading.Thread):
     def nudge(self) -> None:
         self.wake.set()
 
+    def watched(self) -> bool:
+        return time.time() - self.last_watched <= WATCHING_FOR
+
+    def probes_wanted(self) -> bool:
+        """Public URL checks feed the dashboard and the downtime alerts, nothing else."""
+        return self.watched() or bool((config.load().get("notify") or {}).get("url"))
+
     def touch(self) -> None:
         """A browser asked for data: sample at full rate for the next while."""
-        was_idle = time.time() - self.last_watched > WATCHING_FOR
+        was_idle = not self.watched()
         self.last_watched = time.time()
         if was_idle:
-            self.wake.set()  # do not make the first viewer wait out an idle interval
+            self._last_probe = 0.0   # the first viewer gets fresh checks, not hour-old ones
+            self.wake.set()          # ...and does not wait out an idle interval
 
     def interval(self) -> float:
-        return SAMPLE_EVERY if time.time() - self.last_watched <= WATCHING_FOR else IDLE_EVERY
+        return SAMPLE_EVERY if self.watched() else IDLE_EVERY
 
     def run(self) -> None:
         while True:
@@ -398,7 +409,7 @@ class Monitor(threading.Thread):
         with self.lock:
             self.snapshot = snapshot
 
-        if now - self._last_probe >= PROBE_EVERY:
+        if now - self._last_probe >= PROBE_EVERY and self.probes_wanted():
             self._last_probe = now
             threading.Thread(target=self._probe_all, args=(rows, snapshot["routes"]),
                              daemon=True).start()

@@ -505,3 +505,19 @@ def test_the_monitor_samples_slowly_when_nobody_is_watching(monkeypatch):
     assert monitor.interval() == collect.SAMPLE_EVERY and monitor.wake.is_set()
     monitor.last_watched = time.time() - collect.WATCHING_FOR - 1
     assert monitor.interval() == collect.IDLE_EVERY
+
+
+def test_public_url_checks_are_only_taken_when_someone_reads_them(monkeypatch):
+    """Probing every public URL every 30 s was most of the idle CPU, yet with nobody
+    watching and no alert webhook nothing consumes the results."""
+    import time
+    monkeypatch.setattr(collect.Monitor, "refresh", lambda self: None)
+    monitor = collect.Monitor()
+    monkeypatch.setattr(config, "load", lambda: {"apps": {}})
+    assert not monitor.probes_wanted()                              # idle, no webhook
+    monitor.touch()
+    assert monitor.probes_wanted() and monitor._last_probe == 0.0   # a viewer gets fresh checks at once
+    monitor.last_watched = time.time() - collect.WATCHING_FOR - 1
+    assert not monitor.probes_wanted()
+    monkeypatch.setattr(config, "load", lambda: {"apps": {}, "notify": {"url": "https://example.test/h"}})
+    assert monitor.probes_wanted()                                  # alerts need them even unwatched

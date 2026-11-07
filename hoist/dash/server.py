@@ -854,6 +854,7 @@ def make_handler(dash: Dashboard):
                 app["env"] = clean
                 app["updated"] = config.now()
                 service.write_unit(app)
+                containers.refresh_generated_compose(app)   # so a container app actually receives it
             restarted = False
             if not app.get("stopped") and body.get("restart", True):
                 service.restart(name)

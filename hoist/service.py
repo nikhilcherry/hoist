@@ -96,6 +96,11 @@ def render_unit(app: dict) -> str:
     env_lines = "".join(
         env_line(k, v) for k, v in sorted(app.get("env", {}).items())
     )
+    if app.get("front"):
+        # `hoist front` must import this very hoist, installed or from a checkout.
+        env_lines += f"Environment=PYTHONPATH={Path(__file__).resolve().parent.parent}\n"
+        if os.environ.get("HOIST_HOME"):
+            env_lines += f"Environment=HOIST_HOME={os.environ['HOIST_HOME']}\n"
     # Container apps clear a leftover container first and get longer to stop.
     hook_lines = "".join(f"ExecStartPre={line}\n" for line in app.get("pre", []))
     if app.get("kind") in ("db", "compose"):
