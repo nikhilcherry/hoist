@@ -255,7 +255,7 @@ const part = (key, cls = "") => `<div data-part="${key}" class="${cls}"></div>`;
 
 // Hide every control the signed-in person may not use. The server enforces the
 // same rules; this only keeps the page from offering buttons that would be refused.
-const ACTION_CAP = { "new-app": "deploy", "new-db": "deploy", redeploy: "deploy", rollback: "deploy", webhook: "deploy",
+const ACTION_CAP = { "new-app": "create", "new-db": "create", stage: "config", redeploy: "deploy", rollback: "deploy", webhook: "deploy",
   restart: "operate", stop: "operate", start: "operate", pause: "operate", resume: "operate", previews: "operate",
   backup: "backups", restore: "backups", "backup-schedule": "backups", delete: "delete" };
 const CONFIG_UI = "#limits-form button, .env-foot, #link-form, #notify-form .actions";
@@ -337,6 +337,9 @@ function probeText(p) {
   if (!p.code) return `<span style="color:var(--negative)">unreachable</span>`;
   return `<span ${p.up ? "" : 'style="color:var(--negative)"'}>${p.code}</span> <span class="muted">·</span> ${fmt.ms(p.ms)}`;
 }
+const STAGE_LABEL = { production: "Production", staging: "Staging", development: "Development", preview: "Preview" };
+const stagePill = (a) => a?.stage && a.stage !== "production" ? ` <span class="pill ${a.stage === "staging" ? "warn" : ""}">${esc(STAGE_LABEL[a.stage] || a.stage)}</span>` : "";
+
 function sourceCell(a) {
   if (a.kind === "db") return `<div class="nowrap">${ic("db", 14, 'style="vertical-align:-2px;color:var(--muted)"')} ${esc(ENGINE_LABEL[a.db?.engine] || a.db?.engine)}</div><div class="sub">${esc(a.db?.image || "")}</div>`;
   if (a.repo) {

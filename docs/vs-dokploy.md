@@ -44,7 +44,7 @@ Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026
 | CPU, memory, disk, network | ✓ | ✓ | hoist measures containers from their cgroups, not the docker client |
 | External uptime checks of each public URL | ✓ | — | every 30 s, with a one-hour strip and "why it is down" in plain words |
 | Notifications | ✓ | ✓ | hoist: Discord, Slack, Telegram, ntfy, email (SMTP) and any JSON webhook |
-| Team accounts and roles | ✓ | ✓ | hoist: owner, member, viewer and **custom** roles built from six permissions (deploy, operate, config, backups, delete, secrets), limited to chosen apps, each person with their own link. Dokploy's free tier has fixed Owner/Admin/Member roles with per-project, per-service and per-environment access; its custom roles are an Enterprise feature |
+| Team accounts and roles | ✓ | ✓ | hoist: owner, member, viewer and **custom** roles built from eight permissions (create, deploy, operate, config, backups, delete, terminal, secrets), limited to chosen apps and/or **environments** (production, staging, development, preview), each person with their own link. Dokploy's free tier has fixed Owner/Admin/Member roles with per-project, per-service and per-environment access; its custom roles are an Enterprise feature |
 | Audit log | ✓ | ✓ | hoist: who deployed, rolled back, changed env (values never logged) or ran a command, free. In Dokploy audit logs are listed as an Enterprise feature |
 | QR code for every app | ✓ | — | for putting the demo on a judge's phone |
 | Several servers | ◐ | ✓ | hoist: link other machines' dashboards and manage them all from one (apps, deploys, logs, databases, backups), tokens kept server-side. Dokploy also scales one app across a Swarm cluster; hoist does not |
@@ -69,7 +69,7 @@ exits non-zero (`test_a_broken_build_never_touches_the_files_being_served`).
 - Scale one app across a Docker Swarm cluster (hoist links separate machines; it does not schedule one app over them).
 - Ship Nixpacks and Heroku/Paketo buildpacks built in. hoist uses them only if you installed them.
 - A larger built-in template catalogue (hoist: 46, plus any Compose file you add).
-- Per-environment access (production vs staging), an Admin role, SSO (an Enterprise feature in Dokploy), and finer permission categories such as API/CLI and SSH-key access. hoist's permissions are the six listed above.
+- An Admin role, SSO (an Enterprise feature in Dokploy), and permission categories beyond hoist's eight (for example SSH-key and API/CLI access, which hoist does not have as separate concepts). hoist has environments as a label on an app (four fixed values), not Dokploy's separate environment objects per project.
 - Interactive-terminal parity on remote machines: hoist opens the terminal on that machine's own dashboard.
 
 ## When to use which

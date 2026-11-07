@@ -27,17 +27,25 @@ ROLES = ("member", "viewer", "custom")
 # What a person can be allowed to do. "view" is implied for everyone; the rest
 # are granted per person (a role is just a preset) and optionally limited to a
 # list of apps. The owner alone manages people, machines, terminals and commands.
+STAGES = ("production", "staging", "development", "preview")
+DEFAULT_STAGE = "production"
+
 CAPS = {
-    "deploy": "Create apps, redeploy, roll back, set up webhooks",
+    "create": "Create apps, databases and ready-made apps",
+    "deploy": "Redeploy, roll back, set up webhooks",
     "operate": "Restart, stop, start, pause auto-deploy, branch previews",
     "config": "Edit environment variables, resource limits, links and notifications",
     "backups": "Back up, restore and schedule database and volume backups",
     "delete": "Take apps down",
+    "terminal": "Open a terminal and run commands inside an app",
     "secrets": "See environment values, database passwords and download backups",
 }
-PRESETS = {"member": set(CAPS), "viewer": set()}
+# A shell inside an app is far more powerful than restarting it, so the built-in
+# member role does not include it: grant "terminal" deliberately, per person.
+PRESETS = {"member": set(CAPS) - {"terminal"}, "viewer": set()}
 ACTION_CAP = {
-    "redeploy": "deploy", "rollback": "deploy", "webhook": "deploy",
+    "redeploy": "deploy", "rollback": "deploy", "webhook": "deploy", "stage": "config",
+    "exec": "terminal",
     "restart": "operate", "stop": "operate", "start": "operate", "pause": "operate",
     "resume": "operate", "previews": "operate",
     "env": "config", "limits": "config", "link": "config",
@@ -51,7 +59,7 @@ def access(name: str | None) -> dict | None:
     if name is None:
         return None
     if name == OWNER:
-        return {"role": OWNER, "caps": set(CAPS), "apps": None, "owner": True}
+        return {"role": OWNER, "caps": set(CAPS), "apps": None, "stages": None, "owner": True}
     info = users().get(name)
     if info is None:
         return None
@@ -59,10 +67,23 @@ def access(name: str | None) -> dict | None:
     if role == "custom":
         caps = {c for c in info.get("can", []) if c in CAPS}
         apps = set(info.get("apps") or []) or None
+        stages = set(info.get("stages") or []) or None
     else:
         caps = set(PRESETS.get(role, set()))
-        apps = None
-    return {"role": role, "caps": caps, "apps": apps, "owner": False}
+        apps = stages = None
+    return {"role": role, "caps": caps, "apps": apps, "stages": stages, "owner": False}
+
+
+def stage_of(app: str) -> str:
+    """The environment an app belongs to (apps nobody labelled are production)."""
+    a = config.get_app(config.load(), app) or {}
+    return a.get("stage") or ("preview" if a.get("preview_of") else DEFAULT_STAGE)
+
+
+def _in_scope(a: dict, app: str) -> bool:
+    if a["apps"] is not None and app not in a["apps"]:
+        return False
+    return a["stages"] is None or stage_of(app) in a["stages"]
 
 
 def role_of(name: str | None) -> str | None:
@@ -78,18 +99,20 @@ def allows(name: str | None, cap: str, app: str | None = None) -> bool:
     if a["owner"]:
         return True
     if cap == "view":
-        return app is None or a["apps"] is None or app in a["apps"]
+        return app is None or _in_scope(a, app)
     if cap not in a["caps"]:
         return False
-    if a["apps"] is None:
+    if a["apps"] is None and a["stages"] is None:
         return True
-    return app is not None and app in a["apps"]
+    return app is not None and _in_scope(a, app)
 
 
 def scope(name: str | None) -> set[str] | None:
     """The apps this person can see, or None for all of them."""
     a = access(name)
-    return None if a is None or a["apps"] is None else set(a["apps"])
+    if a is None or (a["apps"] is None and a["stages"] is None):
+        return None
+    return {n for n in config.load().get("apps", {}) if _in_scope(a, n)}
 
 
 _lock = threading.Lock()
@@ -127,7 +150,8 @@ def users() -> dict[str, dict]:
         return {}
 
 
-def _custom(role: str, can: list[str] | None, apps: list[str] | None) -> dict:
+def _custom(role: str, can: list[str] | None, apps: list[str] | None,
+            stages: list[str] | None = None) -> dict:
     if role not in ROLES:
         raise TeamError(f"role must be one of {', '.join(ROLES)}")
     if role != "custom":
@@ -137,12 +161,17 @@ def _custom(role: str, can: list[str] | None, apps: list[str] | None) -> dict:
         raise TeamError(f"unknown permission {unknown[0]!r}; choose from {', '.join(CAPS)}")
     can = list(can or [])
     apps = [a for a in (apps or []) if re.match(r"^[a-z0-9][a-z0-9-]{0,39}$", a)]
-    return {"role": "custom", "can": sorted(set(can)), "apps": sorted(set(apps))}
+    bad = [s for s in (stages or []) if s not in STAGES]
+    if bad:
+        raise TeamError(f"unknown environment {bad[0]!r}; choose from {', '.join(STAGES)}")
+    return {"role": "custom", "can": sorted(set(can)), "apps": sorted(set(apps)),
+            "stages": sorted(set(stages or []))}
 
 
-def add(name: str, role: str = "member", can: list[str] | None = None, apps: list[str] | None = None) -> str:
+def add(name: str, role: str = "member", can: list[str] | None = None, apps: list[str] | None = None,
+        stages: list[str] | None = None) -> str:
     name = name.strip().lower()
-    entry = _custom(role, can, apps)
+    entry = _custom(role, can, apps, stages)
     if not NAME.match(name) or name == OWNER:
         raise TeamError("a name is lowercase letters, digits, - or _, up to 24, and not 'owner'")
     with _lock:
@@ -155,8 +184,9 @@ def add(name: str, role: str = "member", can: list[str] | None = None, apps: lis
     return token
 
 
-def set_role(name: str, role: str, can: list[str] | None = None, apps: list[str] | None = None) -> None:
-    entry = _custom(role, can, apps)
+def set_role(name: str, role: str, can: list[str] | None = None, apps: list[str] | None = None,
+             stages: list[str] | None = None) -> None:
+    entry = _custom(role, can, apps, stages)
     with _lock:
         everyone = users()
         if name not in everyone:

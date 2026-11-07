@@ -356,12 +356,17 @@ def test_the_audit_log_is_limited_to_a_scoped_persons_apps(two_apps):
     assert {r["target"] for r in rows} == {"api"}
 
 
-def test_only_the_owner_runs_commands_and_changes_access(two_apps):
+def test_the_terminal_is_a_deliberate_grant_and_people_management_is_owner_only(two_apps):
     from hoist.dash import team
     port, _ = two_apps
-    tok = team.add("god", "custom", list(team.CAPS), [])
-    assert call(port, "POST", "/api/apps/web/exec", {"command": "id"}, headers=_w(tok))[0] == 403
-    assert call(port, "POST", "/api/team", {"name": "x"}, headers=_w(tok))[0] == 403
+    everything_but = team.add("almost", "custom", [c for c in team.CAPS if c != "terminal"], [])
+    assert call(port, "POST", "/api/apps/web/exec", {"command": "id"}, headers=_w(everything_but))[0] == 403
+    assert call(port, "POST", "/api/team", {"name": "x"}, headers=_w(everything_but))[0] == 403
+    member = team.add("plain", "member")
+    assert call(port, "POST", "/api/apps/web/exec", {"command": "id"}, headers=_w(member))[0] == 403
+    shell = team.add("shell", "custom", ["terminal"], ["api"])
+    assert call(port, "POST", "/api/apps/web/exec", {"command": "id"}, headers=_w(shell))[0] == 403  # not their app
+    assert call(port, "POST", "/api/apps/api/exec", {"command": "id"}, headers=_w(shell))[0] != 403
 
 
 def test_unknown_permissions_are_refused(two_apps):
@@ -386,3 +391,82 @@ def test_a_rejected_post_does_not_corrupt_the_next_request_on_the_same_connectio
     second = conn.getresponse(); second.read()
     assert second.status not in (400, 501), second.status
     conn.close()
+
+
+# --- environments (stages) ------------------------------------------------------------
+
+
+def _label(**stages):
+    with config.transaction() as st:
+        for name, stage in stages.items():
+            st["apps"][name]["stage"] = stage
+
+
+def test_environment_scope_shows_and_allows_only_that_environment(two_apps):
+    from hoist.dash import team
+    port, _ = two_apps
+    _label(web="production", api="staging")
+    tok = team.add("qa", "custom", ["operate"], [], ["staging"])
+    names = [a["name"] for a in json.loads(call(port, "GET", "/api/state", headers=auth(tok))[2])["apps"]]
+    assert names == ["api"]
+    assert call(port, "GET", "/api/apps/web", headers=auth(tok))[0] == 404
+    assert call(port, "POST", "/api/apps/web/restart", {}, headers=_w(tok))[0] == 403
+    assert call(port, "POST", "/api/apps/api/restart", {}, headers=_w(tok))[0] != 403
+
+
+def test_an_app_moved_into_an_environment_becomes_visible_without_editing_the_person(two_apps):
+    from hoist.dash import team
+    port, _ = two_apps
+    _label(web="production", api="production")
+    tok = team.add("qa", "custom", ["operate"], [], ["staging"])
+    assert json.loads(call(port, "GET", "/api/state", headers=auth(tok))[2])["apps"] == []
+    _label(api="staging")
+    names = [a["name"] for a in json.loads(call(port, "GET", "/api/state", headers=auth(tok))[2])["apps"]]
+    assert names == ["api"]
+
+
+def test_unlabelled_apps_are_production_and_previews_are_previews(two_apps):
+    from hoist.dash import team
+    with config.transaction() as st:
+        st["apps"]["web-feature"] = {"name": "web-feature", "port": 3, "preview_of": "web"}
+    assert team.stage_of("web") == "production"
+    assert team.stage_of("web-feature") == "preview"
+
+
+def test_stage_and_app_scopes_must_both_match(two_apps):
+    from hoist.dash import team
+    _label(web="staging", api="staging")
+    tok = team.add("narrow", "custom", ["operate"], ["api"], ["staging"])
+    assert team.allows(tok and "narrow", "operate", "api") and not team.allows("narrow", "operate", "web")
+    _label(api="production")
+    assert not team.allows("narrow", "operate", "api")  # right app, wrong environment now
+
+
+def test_changing_an_apps_environment_needs_the_config_permission(two_apps):
+    from hoist.dash import team
+    port, _ = two_apps
+    no_config = team.add("ops", "custom", ["operate"], [])
+    assert call(port, "POST", "/api/apps/web/stage", {"stage": "staging"}, headers=_w(no_config))[0] == 403
+    can_config = team.add("cfg", "custom", ["config"], [])
+    status, _, body = call(port, "POST", "/api/apps/web/stage", {"stage": "nonsense"}, headers=_w(can_config))
+    assert status == 400 and b"pick one of" in body
+
+
+def test_unknown_environments_are_refused(two_apps):
+    from hoist.dash import team
+    with pytest.raises(team.TeamError):
+        team.add("x", "custom", ["operate"], [], ["prod"])
+
+
+def test_someone_limited_to_an_environment_cannot_relabel_apps(two_apps):
+    """The bug this pins: a staging-scoped person with 'config' could move their
+    own app to production, silently taking it out of their own scope."""
+    from hoist.dash import team
+    port, _ = two_apps
+    _label(api="staging")
+    scoped = team.add("qa", "custom", ["config"], [], ["staging"])
+    status, _, body = call(port, "POST", "/api/apps/api/stage", {"stage": "production"}, headers=_w(scoped))
+    assert status == 403 and b"cannot change" in body
+    assert team.stage_of("api") == "staging"
+    unscoped = team.add("lead", "custom", ["config"], [])
+    assert call(port, "POST", "/api/apps/api/stage", {"stage": "staging"}, headers=_w(unscoped))[0] != 403

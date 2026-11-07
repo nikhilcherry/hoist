@@ -336,14 +336,14 @@ def make_handler(dash: Dashboard):
                 for name, info in sorted(team.users().items()):
                     people.append({"name": name, "role": info.get("role", "member"), "added": info.get("added"),
                                    "seen": dash.seen.get(name), "can": info.get("can", []),
-                                   "apps": info.get("apps", [])})
+                                   "apps": info.get("apps", []), "stages": info.get("stages", [])})
                 seen = team.scope(self.user)
                 audit = team.audit_tail(int((query.get("n") or ["200"])[0]))
                 if seen is not None:  # a scoped person sees only their own apps' history
                     audit = [r for r in audit if r.get("target") in seen]
                     people = [p for p in people if p["name"] == self.user]
                 return self._json({"me": self.user, "people": people, "audit": audit,
-                                   "caps": team.CAPS})
+                                   "caps": team.CAPS, "stages": list(team.STAGES)})
 
             if path == "/api/metrics":
                 return self._json({"system": dash.monitor.series()})
@@ -472,8 +472,8 @@ def make_handler(dash: Dashboard):
         def _terminal(self, name: str, app: dict) -> None:
             if self.headers.get("Upgrade", "").lower() != "websocket":
                 return self._error(426, "this endpoint speaks WebSocket")
-            if self.user != team.OWNER:
-                return self._error(403, "only the owner can open a terminal")
+            if not team.allows(self.user, "terminal", name):
+                return self._error(403, "your access does not include the terminal")
             # Cross-site WebSocket hijacking: browsers send cookies with any
             # WebSocket, so the page that opens it must be this dashboard.
             origin = urllib.parse.urlsplit(self.headers.get("Origin", "")).netloc
@@ -647,8 +647,12 @@ def make_handler(dash: Dashboard):
                 can, apps = body.get("can") or [], body.get("apps") or []
                 if not isinstance(can, list) or not isinstance(apps, list):
                     raise ValueError("can and apps must be lists")
-                token = team.add(name, role, [str(c) for c in can], [str(a) for a in apps])
-                self._audit("add teammate", name.strip().lower(), _describe(role, can, apps))
+                stages = body.get("stages") or []
+                if not isinstance(stages, list):
+                    raise ValueError("stages must be a list")
+                token = team.add(name, role, [str(c) for c in can], [str(a) for a in apps],
+                                 [str(s) for s in stages])
+                self._audit("add teammate", name.strip().lower(), _describe(role, can, apps, stages))
                 base = str(body.get("origin") or "").rstrip("/")
                 if not re.match(r"^https?://[^/\s]+$", base):
                     base = ""
@@ -661,8 +665,12 @@ def make_handler(dash: Dashboard):
                 can, apps = body.get("can") or [], body.get("apps") or []
                 if not isinstance(can, list) or not isinstance(apps, list):
                     raise ValueError("can and apps must be lists")
-                team.set_role(match.group(1), role, [str(c) for c in can], [str(a) for a in apps])
-                self._audit("change access", match.group(1), _describe(role, can, apps))
+                stages = body.get("stages") or []
+                if not isinstance(stages, list):
+                    raise ValueError("stages must be a list")
+                team.set_role(match.group(1), role, [str(c) for c in can], [str(a) for a in apps],
+                              [str(s) for s in stages])
+                self._audit("change access", match.group(1), _describe(role, can, apps, stages))
                 return self._json({"ok": True})
             match = re.fullmatch(r"/api/team/([a-z][a-z0-9_-]{0,23})/remove", path)
             if match:
@@ -739,8 +747,6 @@ def make_handler(dash: Dashboard):
                     args += ["--var", var]
                 return self._run_quick(args)
             if action == "exec":
-                if self.user != team.OWNER:
-                    return self._error(403, "only the owner can run commands")
                 command = str(body.get("command", "")).strip()
                 if not command or len(command) > 2000 or "\n" in command:
                     raise ValueError("one command, on one line")
@@ -775,6 +781,14 @@ def make_handler(dash: Dashboard):
                 if not re.match(r"^https?://[^/\s]+$", base):
                     base = ""
                 return self._json({"url": f"{base}/hooks/{name}", "secret": secret})
+            if action == "stage":
+                scoped = (team.access(self.user) or {}).get("stages")
+                if scoped is not None:  # moving an app between environments is a governance change
+                    return self._error(403, "people limited to some environments cannot change an app's environment")
+                stage = str(body.get("stage", ""))
+                if stage not in team.STAGES:
+                    raise ValueError(f"pick one of {', '.join(team.STAGES)}")
+                return self._run_quick(["stage", name, stage])
             if action == "previews":
                 return self._run_quick(["previews", name, "on" if body.get("on") else "off"])
             if action == "limits":
@@ -903,7 +917,7 @@ def redact_state(snap: dict, keep=lambda name: False) -> dict:
 def _required(path: str):
     """(capability, app) a write to `path` needs, or None when the handler checks for itself."""
     if path in ("/api/apps", "/api/templates", "/api/databases"):
-        return ("deploy", None)
+        return ("create", None)
     if path in ("/api/notify", "/api/notify/test"):
         return ("config", None)
     match = re.fullmatch(r"/api/apps/([a-z0-9-]+)/([a-z-]+)", path)
@@ -916,11 +930,13 @@ def _required(path: str):
     return None
 
 
-def _describe(role: str, can: list, apps: list) -> str:
+def _describe(role: str, can: list, apps: list, stages: list | None = None) -> str:
     if role != "custom":
         return role
-    return f"custom: {', '.join(sorted(map(str, can))) or 'view only'}" + (
-        f" on {', '.join(sorted(map(str, apps)))}" if apps else " on all apps")
+    where = (f" on {', '.join(sorted(map(str, apps)))}" if apps else " on all apps")
+    if stages:
+        where += f" in {', '.join(sorted(map(str, stages)))}"
+    return f"custom: {', '.join(sorted(map(str, can))) or 'view only'}" + where
 
 
 def _denied(user: str | None, cap: str, app: str | None) -> str:

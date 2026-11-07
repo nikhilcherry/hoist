@@ -253,6 +253,14 @@ function newDbDialog(engine = "postgres") {
   });
 }
 
+// One listener for the whole page (never registered per view, which would stack duplicates).
+document.addEventListener("change", async (e) => {
+  const who = e.target?.dataset?.stageOf;
+  if (!who) return;
+  try { await post(`/api/apps/${who}/stage`, { stage: e.target.value }); toast(`${who} is now in ${STAGE_LABEL[e.target.value]}`); poll(); }
+  catch (err) { toast(err.message, true); }
+});
+
 document.addEventListener("submit", async (e) => {
   if (e.target.id !== "link-form") return;
   e.preventDefault();

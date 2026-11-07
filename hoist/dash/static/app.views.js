@@ -120,7 +120,7 @@ function appsTable(apps, { compact = false } = {}) {
     ${apps.map((a) => {
       const why = isBroken(a) ? diagnose(a) : "";
       return `<tr class="click" data-href="/apps/${a.name}">
-        <td><div class="name">${esc(a.name)}</div><div class="sub">${a.public ? esc(a.hostname) : `${esc(fmt.host(a.url))} · LAN only`}</div></td>
+        <td><div class="name">${esc(a.name)}${stagePill(a)}</div><div class="sub">${a.public ? esc(a.hostname) : `${esc(fmt.host(a.url))} · LAN only`}</div></td>
         <td>${statusPill(a.status)}${why ? `<div class="sub" style="color:var(--negative);max-width:240px" title="${esc(why)}">${esc(why)}</div>` : ""}</td>
         <td class="hide-sm">${sourceCell(a)}</td>
         <td class="r">${a.public ? probeText(a.probe) : '<span class="dash">LAN only</span>'}</td>
@@ -194,7 +194,7 @@ VIEWS.app = (name, tab = "overview") => {
         const why = isBroken(app) ? diagnose(app) : app.repo?.failed_sha ? diagnose(app) : "";
         return `<div class="title-row">
           <div class="titles">
-            <h1>${esc(name)} ${statusPill(app.status)}${app.repo?.paused ? '<span class="pill paused">Auto-deploy paused</span>' : ""}${busy ? `<span class="pill building"><span class="d"></span>${esc(busy.title)}</span>` : ""}</h1>
+            <h1>${esc(name)} ${statusPill(app.status)}${app.repo?.paused ? '<span class="pill paused">Auto-deploy paused</span>' : ""}${stagePill(app)}${busy ? `<span class="pill building"><span class="d"></span>${esc(busy.title)}</span>` : ""}</h1>
             <div class="subline">
               ${app.kind === "db" ? `<span>${ic("db", 14, 'style="vertical-align:-2px"')} ${esc(ENGINE_LABEL[app.db?.engine] || "")} · ${esc(app.db?.image || "")}</span>` : `<a href="${esc(app.url)}" target="_blank" rel="noopener">${esc(app.public ? app.hostname : app.url)} ${ic("ext", 13, 'style="vertical-align:-2px"')}</a>
               <button class="btn ghost icon sm" data-action="copy" data-text="${esc(app.url)}" aria-label="Copy URL" title="Copy URL">${ic("copy", 14)}</button>`}
@@ -214,7 +214,7 @@ VIEWS.app = (name, tab = "overview") => {
       },
       tabs() {
         const app = a(); const hist = d()?.history?.length;
-        return `<div class="tabs" role="tablist">${TABS.filter(([k]) => !(app?.adopted && ["logs", "console", "environment"].includes(k)) && !(k === "console" && store.state?.me !== "owner") && !(app?.kind === "db" && ["deployments", "environment"].includes(k))).map(([k, label]) =>
+        return `<div class="tabs" role="tablist">${TABS.filter(([k]) => !(app?.adopted && ["logs", "console", "environment"].includes(k)) && !(k === "console" && store.state?.me !== "owner" && !(store.state?.can || []).includes("terminal")) && !(app?.kind === "db" && ["deployments", "environment"].includes(k))).map(([k, label]) =>
           `<a href="${k === "overview" ? base : `${base}/${k}`}" data-link role="tab" aria-selected="${tab === k}">${label}${k === "deployments" && hist ? ` <span class="count">${hist}</span>` : ""}${k === "environment" && app?.env_keys?.length ? ` <span class="count">${app.env_keys.length}</span>` : ""}</a>`).join("")}</div>`;
       },
     },
@@ -665,6 +665,7 @@ function appSettings(name, a) {
           ["Start command", app.cmd ? `<code>${esc(app.cmd)}</code>` : '<span class="dash">—</span>'],
           ["Working directory", `<code>${esc(app.workdir || "—")}</code>`],
           ["systemd unit", app.adopted ? '<span class="muted">none — hoist does not run this process</span>' : `<code>hoist-${esc(name)}.service</code> <span class="muted">(user unit)</span>`],
+          ["Environment", `<select class="select" style="width:auto;height:30px" data-stage-of="${esc(name)}" aria-label="Environment">${Object.entries(STAGE_LABEL).map(([k, v]) => `<option value="${k}" ${app.stage === k ? "selected" : ""}>${v}</option>`).join("")}</select> <span class="muted" style="font-size:12px">access can be limited per environment</span>`],
           ["Created", `${esc(fmt.when(app.created))}`],
         ];
         return `<div class="card-head"><h2>Runtime</h2></div><div class="dl">${rows.map(([k, v]) => `<div class="dt">${k}</div><div class="dd">${v}</div>`).join("")}</div>`;
@@ -906,27 +907,31 @@ VIEWS.databases = () => ({
 
 function accessSummary(p) {
   const caps = (p.can || []).length ? p.can.join(", ") : "view only";
-  return `${esc(caps)} · ${(p.apps || []).length ? `only ${p.apps.map(esc).join(", ")}` : "all apps"}`;
+  const where = (p.apps || []).length ? `only ${p.apps.map(esc).join(", ")}` : "all apps";
+  return `${esc(caps)} · ${where}${(p.stages || []).length ? ` · ${p.stages.map(esc).join(", ")} only` : ""}`;
 }
 function accessLabel(p) { return p.role === "viewer" ? "Viewer" : p.role === "custom" ? "Custom" : "Member"; }
 
 // The capability and app pickers, shared by "add a teammate" and "edit access".
-function accessPicker(caps, chosen = [], apps = [], prefix = "ac") {
+function accessPicker(caps, chosen = [], apps = [], prefix = "ac", stages = []) {
   const names = (store.state?.apps || []).map((a) => a.name);
   const capRows = Object.entries(caps).map(([k, v]) => `<label class="tpl" style="padding:8px 10px"><input type="checkbox" data-cap="${k}" ${chosen.includes(k) ? "checked" : ""}><span><strong>${esc(k)}</strong><span class="muted"> — ${esc(v)}</span></span></label>`).join("");
   const appRows = names.length ? names.map((n) => `<label class="tpl" style="padding:6px 10px"><input type="checkbox" data-appscope="${esc(n)}" ${apps.includes(n) ? "checked" : ""}><span class="mono" style="font-size:12.5px">${esc(n)}</span></label>`).join("") : '<span class="muted">No apps yet.</span>';
+  const stageRows = Object.entries(STAGE_LABEL).map(([k, v]) => `<label class="tpl" style="padding:6px 10px"><input type="checkbox" data-stagescope="${k}" ${stages.includes(k) ? "checked" : ""}><span>${v}</span></label>`).join("");
   return `<div class="field" id="${prefix}-box"><label>What they can do</label>
     <div style="display:flex;flex-direction:column;gap:6px">${capRows}</div>
+    <label style="margin-top:8px">Which environments <span class="muted" style="font-weight:400">(none ticked = all; an app moved into one later is included automatically)</span></label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">${stageRows}</div>
     <label style="margin-top:8px">Which apps <span class="muted" style="font-weight:400">(none ticked = all apps; apps created later are not included)</span></label>
     <div style="display:flex;flex-wrap:wrap;gap:6px">${appRows}</div></div>`;
 }
-const readPicker = (root) => ({ can: $$("[data-cap]:checked", root).map((x) => x.dataset.cap), apps: $$("[data-appscope]:checked", root).map((x) => x.dataset.appscope) });
+const readPicker = (root) => ({ can: $$("[data-cap]:checked", root).map((x) => x.dataset.cap), apps: $$("[data-appscope]:checked", root).map((x) => x.dataset.appscope), stages: $$("[data-stagescope]:checked", root).map((x) => x.dataset.stagescope) });
 
 function editAccess(who) {
   const p = (store.team?.people || []).find((x) => x.name === who);
   if (!p) return;
   const box = openLayer(`<div class="dialog" style="width:min(560px,calc(100vw - 32px));top:8vh"><form class="body" id="access-form" style="max-height:74vh;overflow:auto"><h2>Access for ${esc(who)}</h2>
-    ${accessPicker(store.team.caps || {}, p.can || [], p.apps || [], "ed")}</form>
+    ${accessPicker(store.team.caps || {}, p.can || [], p.apps || [], "ed", p.stages || [])}</form>
     <div class="foot"><button class="btn" data-x>Cancel</button><button class="btn primary" form="access-form" type="submit">Save access</button></div></div>`);
   $("[data-x]", box).onclick = () => { closeLayer(); poll(); };
   $("#access-form", box).addEventListener("submit", async (e) => {

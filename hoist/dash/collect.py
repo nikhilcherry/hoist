@@ -337,6 +337,7 @@ class Monitor(threading.Thread):
                 "env_keys": sorted((app.get("env") or {}).keys()),
                 "limits": app.get("limits") or {},
                 "kind": app.get("kind") or "app",
+                "stage": app.get("stage") or ("preview" if app.get("preview_of") else "production"),
                 "containers": boxed.get(name, {}).get("containers"),
                 "preview_of": app.get("preview_of"),
                 "dockerfile": bool(app.get("dockerfile")),

@@ -348,6 +348,13 @@ def cmd_up(args: argparse.Namespace) -> int:
         app["dockerfile"] = True
     if getattr(args, "preview_of", None):
         app["preview_of"] = args.preview_of
+    if getattr(args, "stage", None):
+        from .dash import team as _team
+        if args.stage not in _team.STAGES:
+            raise UserError(f"stage must be one of {', '.join(_team.STAGES)}")
+        app["stage"] = args.stage
+    elif existing and existing.get("stage"):
+        app["stage"] = existing["stage"]
 
     ui.info(f"{ui.bold(name)} {ui.dim('·')} {how} {ui.dim('·')} port {port}")
     ui.step(f"$ {command.replace('$PORT', str(port))}")
@@ -734,6 +741,19 @@ def cmd_webhook(args: argparse.Namespace) -> int:
     ui.step("pushes then deploy within seconds; the 20 s check stays on as a fallback")
     if "<" in base:
         ui.step("the dashboard must be reachable by GitHub: hoist dash --public dash")
+    return 0
+
+
+def cmd_stage(args: argparse.Namespace) -> int:
+    from .dash import team
+    if args.stage not in team.STAGES:
+        raise UserError(f"stage must be one of {', '.join(team.STAGES)}")
+    with config.transaction() as state:
+        app = config.get_app(state, args.name)
+        if app is None:
+            raise UserError(f"no hoisted app called {args.name!r}")
+        app["stage"] = args.stage
+    ui.ok(f"{args.name} is now in {args.stage}")
     return 0
 
 
@@ -1297,7 +1317,8 @@ def cmd_dash(args: argparse.Namespace) -> int:
         try:
             member = team.add(args.add_user, args.role,
                               [c for c in (args.can or "").split(",") if c],
-                              [a for a in (args.apps or "").split(",") if a])
+                              [a for a in (args.apps or "").split(",") if a],
+                              [s for s in (args.stages or "").split(",") if s])
         except team.TeamError as exc:
             raise UserError(str(exc)) from exc
         team.audit("owner", "add teammate", args.add_user.lower(), "from the CLI")
@@ -1315,7 +1336,10 @@ def cmd_dash(args: argparse.Namespace) -> int:
         def summary(i: dict) -> str:
             if i.get("role") != "custom":
                 return i.get("role", "member")
-            return f"custom: {','.join(i.get('can', [])) or 'view'} on {','.join(i.get('apps', [])) or 'all apps'}"
+            where = ','.join(i.get('apps', [])) or 'all apps'
+            if i.get('stages'):
+                where += f" in {','.join(i['stages'])}"
+            return f"custom: {','.join(i.get('can', [])) or 'view'} on {where}"
         ui.table([["owner", "owner", "—"]] + [[n, summary(i), i.get("added", "")] for n, i in sorted(people.items())],
                  ["NAME", "ACCESS", "ADDED"])
         return 0
@@ -1400,6 +1424,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--build", help="build command for a repo, overriding detection")
     up.add_argument("--buildpack", nargs="?", const="auto", choices=["auto", "nixpacks", "pack"],
                     help="build with a buildpack you already have installed (any language)")
+    up.add_argument("--stage", help="production (default), staging, development or preview")
     up.add_argument("--preview-of", help=argparse.SUPPRESS)
     up.add_argument("--no-sync", action="store_true",
                     help="deploy a repo once, without redeploying on push")
@@ -1414,6 +1439,7 @@ def build_parser() -> argparse.ArgumentParser:
     share.add_argument("--hostname")
     share.add_argument("--env", action="append", metavar="K=V")
     share.add_argument("--local", action="store_true")
+    share.add_argument("--stage", help="production (default), staging, development or preview")
     add_qr_flags(share)
     share.set_defaults(func=cmd_share)
 
@@ -1518,6 +1544,11 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--off", action="store_true")
     hook.set_defaults(func=cmd_webhook)
 
+    stg = sub.add_parser("stage", help="label an app production, staging, development or preview")
+    stg.add_argument("name")
+    stg.add_argument("stage", metavar="STAGE", help="production, staging, development or preview")
+    stg.set_defaults(func=cmd_stage)
+
     prev = sub.add_parser("previews", help="give every branch its own preview app")
     prev.add_argument("name")
     prev.add_argument("state", choices=["on", "off"])
@@ -1547,8 +1578,10 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--role", default="member", choices=["member", "viewer", "custom"],
                       help="with --add-user: member (everything but people), viewer (read only) or custom")
     dash.add_argument("--can", metavar="LIST",
-                      help="with --role custom: comma list of deploy,operate,config,backups,delete,secrets")
+                      help="with --role custom: comma list of create,deploy,operate,config,backups,delete,terminal,secrets")
     dash.add_argument("--apps", metavar="LIST", help="with --role custom: only these apps (default: all)")
+    dash.add_argument("--stages", metavar="LIST",
+                      help="with --role custom: only apps in these environments (production,staging,development,preview)")
     dash.add_argument("--remove-user", metavar="NAME", help="revoke a teammate's link")
     dash.add_argument("--users", action="store_true", help="list who has access")
     dash.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
