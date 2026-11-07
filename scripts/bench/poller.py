@@ -3,8 +3,8 @@
 
     poller.py URL OUTFILE [--host HOSTHEADER]
 
-Each line is `epoch_seconds status version`, where version is the text after
-`VERSION:` in the response body ("-" when there is none, status 0 on a
+Each line is `epoch_seconds status version latency_ms`, where version is the text
+after `VERSION:` in the response body ("-" when there is none, status 0 on a
 connection error or timeout). The log is the ground truth for two numbers:
 how long a push took to appear, and whether the old version ever stopped
 answering while the new one came up.
@@ -39,7 +39,7 @@ def main() -> int:
             conn.close()
         except (OSError, http.client.HTTPException):
             pass
-        out.write(f"{started:.3f} {status} {version}\n")
+        out.write(f"{started:.3f} {status} {version} {(time.time() - started) * 1000:.0f}\n")
         time.sleep(max(0.0, 0.05 - (time.time() - started)))
 
 

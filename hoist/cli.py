@@ -15,7 +15,7 @@ import shlex
 import shutil
 import subprocess
 
-from . import config, containers, detect, notify, qr, service, source, tunnel, ui
+from . import config, containers, detect, front, notify, qr, service, source, tunnel, ui
 
 __version__ = "0.1.0"
 
@@ -231,6 +231,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     kind = None
     compose_path = None
     generated = False
+    front_cfg = None
     buildpack = None
     if command == detect.BUILDPACK:
         buildpack = containers.buildpack_tool(None if wants_buildpack in (None, "auto") else wants_buildpack)
@@ -239,14 +240,14 @@ def cmd_up(args: argparse.Namespace) -> int:
                             "(buildpacks.io) yourself — hoist never installs build tools — or add a Dockerfile")
         if not containers.available():
             raise UserError("buildpacks build Docker images, and hoist needs a running Docker for it")
-        compose_path = containers.ensure_buildpack_compose(target, name)
+        compose_path = containers.ensure_buildpack_compose(target, name, _parse_env(args.env))
         generated = True
         how = f"{buildpack} buildpack (port {containers.BUILDPACK_INNER_PORT} inside)"
         command = detect.COMPOSE
     if command == detect.DOCKERFILE:
         if not containers.available():
             raise UserError("this project has a Dockerfile, and hoist needs a running Docker for it")
-        compose_path = containers.ensure_dockerfile_compose(target)
+        compose_path = containers.ensure_dockerfile_compose(target, _parse_env(args.env))
         generated = True
         how = f"Dockerfile (port {containers.dockerfile_port(target)} inside)"
         command = detect.COMPOSE
@@ -258,7 +259,12 @@ def cmd_up(args: argparse.Namespace) -> int:
         if not generated:
             how = f"Compose stack ({compose_path.name})"
         command = containers.compose_up_command(name, generated) + ("" if repo is not None else " --build")
-        if not args.port and not containers.compose_uses_port_var(compose_path):
+        if generated:
+            # hoist owns the public port and forwards to the container: seamless redeploys.
+            inner = containers.BUILDPACK_INNER_PORT if buildpack else containers.dockerfile_port(target)
+            front_cfg = {"inner": inner, "bind": "0.0.0.0" if args.local else "127.0.0.1"}
+            command = front.front_command(name)
+        elif not args.port and not containers.compose_uses_port_var(compose_path):
             published = containers.compose_published_port(compose_path)
             if published is None:
                 raise UserError("the compose file publishes no port — add `ports: [\"${PORT}:<container port>\"]`"
@@ -331,9 +337,10 @@ def cmd_up(args: argparse.Namespace) -> int:
         "created": (existing or {}).get("created") or config.now(),
         "updated": config.now(),
     }
-    if buildpack and repo is None:
+    if generated and repo is None:
         # A local folder has no deploy step to build in, so build the image now.
-        step = getattr(args, "build", None) or containers.buildpack_build_step(buildpack, name)
+        step = getattr(args, "build", None) or (containers.buildpack_build_step(buildpack, name) if buildpack
+                                                else containers.compose_build_step(name, True))
         ok, detail = source.run_build(target, [step], log=ui.step)
         if not ok:
             raise UserError(f"build failed: {detail}")
@@ -342,6 +349,8 @@ def cmd_up(args: argparse.Namespace) -> int:
         app["repo"] = repo
     if kind == "compose":
         app["kind"] = "compose"
+    if front_cfg:
+        app["front"] = front_cfg
     if generated and buildpack:
         app["buildpack"] = buildpack
     elif generated:
@@ -363,6 +372,11 @@ def cmd_up(args: argparse.Namespace) -> int:
         raise UserError("systemd --user is unavailable; hoist needs it to run apps")
 
     service.write_unit(app)
+    if app.get("front"):
+        # `hoist front` reads its own configuration when it starts, so the app must be
+        # on record before its unit is.
+        with config.transaction() as _state:
+            config.put_app(_state, app)
     try:
         if existing:
             service.restart(name)
@@ -571,10 +585,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
     print(f"deploying {commit} ({trigger})")
     transcript: list[str] = []
     release = source.find_release(args.name, wanted) if to else None
+    env_keys = list((app.get("env") or {}).keys())
     if release is not None:
         ok, detail = True, ""
         transcript.append(f"reusing the release built earlier: {release.name}")
         print(transcript[-1])
+        if app.get("dockerfile"):   # an old release may carry the pre-rollover compose file
+            containers.ensure_dockerfile_compose(release, env_keys)
+        elif app.get("buildpack"):
+            containers.ensure_buildpack_compose(release, args.name, env_keys)
     else:
         try:
             release = source.prepare_release(args.name, target, wanted)
@@ -584,10 +603,23 @@ def cmd_sync(args: argparse.Namespace) -> int:
             print(f"skipped: {exc}")
             return 0
         if app.get("dockerfile"):
-            containers.ensure_dockerfile_compose(release)
+            containers.ensure_dockerfile_compose(release, env_keys)
         elif app.get("buildpack"):
-            containers.ensure_buildpack_compose(release, args.name)
+            containers.ensure_buildpack_compose(release, args.name, env_keys)
         ok, detail = source.run_build(release, repo.get("build", []), transcript=transcript)
+
+    # Seamless path: start the new container beside the old and let `hoist front`
+    # switch to it once it answers. A new version that never answers fails the
+    # deploy here, with the old one untouched and still serving.
+    rolled = False
+    if ok and app.get("front") and not app.get("stopped"):
+        swapped, why = front.rollover(args.name, release, app.get("env"))
+        if swapped is False:
+            ok, detail = False, why
+            transcript.append(why)
+        elif swapped:
+            rolled = True
+            transcript.append("started beside the old version; traffic switched with no gap")
 
     entry = {"sha": wanted, "commit": commit, "at": config.now(), "trigger": trigger,
              "seconds": round(time.monotonic() - started, 1)}
@@ -623,6 +655,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
             app["workdir"] = link
             app["cmd"] = app.get("cmd", "").replace(str(target), link)
             service.write_unit(app)
+        if (app.get("dockerfile") or app.get("buildpack")) and not app.get("front"):
+            # Deployed before seamless rollover existed: switch it over now. This one
+            # redeploy still restarts the container; every later one does not.
+            inner = (containers.BUILDPACK_INNER_PORT if app.get("buildpack")
+                     else containers.dockerfile_port(release))
+            app["front"] = {"inner": inner, "bind": "127.0.0.1" if app.get("tunnel") else "0.0.0.0"}
+            app["cmd"] = front.front_command(args.name)
+            service.write_unit(app)
         app["repo"].update(sha=wanted, commit=commit, deployed=config.now())
         app["repo"].pop("failed_sha", None)
         if to:
@@ -631,7 +671,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         hostname = app.get("hostname") if app.get("tunnel") else None
 
     # Restart and wait outside the lock: health checks take seconds.
-    if not stopped:
+    if rolled:
+        health = "up"
+    elif not stopped:
         service.restart(args.name)
         health = _wait_for_healthy(args.name, port, 240 if kind == "compose" else HEALTH_TIMEOUT,
                                    detect.http_answers if kind == "compose" else None)
@@ -742,6 +784,19 @@ def cmd_webhook(args: argparse.Namespace) -> int:
     if "<" in base:
         ui.step("the dashboard must be reachable by GitHub: hoist dash --public dash")
     return 0
+
+
+def cmd_front(args: argparse.Namespace) -> int:
+    """Run by the app's systemd unit: own the public port and forward to the container."""
+    import asyncio
+    app = config.get_app(config.load(), args.name)
+    if app is None or not app.get("front"):
+        raise UserError(f"{args.name!r} is not a seamless-rollover app")
+    cfg = app["front"]
+    workdir = Path(app["workdir"])
+    docker = front.Docker(containers.compose_project(args.name), lambda: workdir.resolve(),
+                          env=dict(app.get("env") or {}))
+    return asyncio.run(front.serve(args.name, docker, cfg["bind"], int(app["port"]), int(cfg["inner"])))
 
 
 def cmd_stage(args: argparse.Namespace) -> int:
@@ -1211,6 +1266,7 @@ def cmd_link(args: argparse.Namespace) -> int:
         app.setdefault("env", {})[var] = db["db"]["url"]
         app["updated"] = config.now()
         service.write_unit(app)
+        containers.refresh_generated_compose(app)
     if not app.get("stopped"):
         service.restart(args.app)
     ui.ok(f"{args.app} now has {var} pointing at {args.db} (restarted)")
@@ -1543,6 +1599,10 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("name")
     hook.add_argument("--off", action="store_true")
     hook.set_defaults(func=cmd_webhook)
+
+    fr = sub.add_parser("front", help=argparse.SUPPRESS)
+    fr.add_argument("name")
+    fr.set_defaults(func=cmd_front)
 
     stg = sub.add_parser("stage", help="label an app production, staging, development or preview")
     stg.add_argument("name")

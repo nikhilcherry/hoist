@@ -74,9 +74,9 @@ def test_a_lone_dockerfile_is_wrapped_with_its_exposed_port(tmp_path):
     assert detect.detect_command(tmp_path)[0] == detect.DOCKERFILE
     path = containers.ensure_dockerfile_compose(tmp_path)
     text = path.read_text()
-    assert "build: ." in text and "127.0.0.1:${PORT}:8000" in text
+    assert "build: ." in text and 'PORT: "8000"' in text
     assert "init: true" in text  # else every stop waits 10 s for a SIGTERM the app ignores
-    assert containers.compose_uses_port_var(path)
+    assert "ports:" not in text  # `hoist front` owns the public port; two containers can overlap
     assert "-f compose.hoist.yml" in containers.compose_up_command("web", generated=True)
 
 
@@ -178,6 +178,16 @@ def test_buildpack_steps_and_compose_wrapper(tmp_path):
     assert step.startswith("pack build hoist-api:latest --builder ")
     path = containers.ensure_buildpack_compose(tmp_path, "api")
     text = path.read_text()
-    assert "image: hoist-api:latest" in text and "127.0.0.1:${PORT}:8080" in text and 'PORT: "8080"' in text
-    assert "init: true" in text
-    assert containers.compose_uses_port_var(path)
+    assert "image: hoist-api:latest" in text and 'PORT: "8080"' in text
+    assert "init: true" in text and "ports:" not in text
+
+
+def test_env_variables_reach_a_container_app_through_the_generated_compose_file(tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\nEXPOSE 8000\n")
+    app = {"name": "w", "workdir": str(tmp_path), "dockerfile": True, "env": {"API_KEY": "s3cret", "PORT": "x"}}
+    assert containers.refresh_generated_compose(app) is True
+    text = (tmp_path / containers.GENERATED_COMPOSE).read_text()
+    assert "API_KEY: ${API_KEY:-}" in text           # filled in from the unit's environment...
+    assert "s3cret" not in text                       # ...so the secret itself is never written to disk
+    assert text.count("PORT:") == 1                   # hoist's own PORT is not overridable
+    assert containers.refresh_generated_compose({"name": "p", "workdir": str(tmp_path)}) is False

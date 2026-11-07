@@ -18,11 +18,11 @@ the method, raw logs and caveats are in [benchmark.md](benchmark.md).
 | Idle memory | 29.6 MiB | 638 MiB |
 | Dashboard first load | 283 ms, 460 KB | 958 ms, 7.2 MB |
 | Dashboard API call (median) | 3.5 ms | 24.1 ms |
-| Push→live, Dockerfile app (median of 5) | 1.88 s | 2.53 s |
-| Downtime while a container app is replaced | 0.65–1.45 s | ≈ 0.1 s |
-| Idle CPU (nothing watching) | 0.30 % | ≈ 0.1 % |
+| Push→live, Dockerfile app (median) | 1.54 s | 2.53 s |
+| Downtime while a container app is replaced | 0.00 s (Dockerfile/buildpack apps) | ≈ 0.1 s |
+| Idle CPU (nothing watching) | 0.30 % + 0.02 % per container app | ≈ 0.1 % |
 
-Dokploy is ahead on seamless rollover and idle CPU. hoist is ahead on the rest.
+Dokploy is ahead on idle CPU. hoist is ahead on the rest, including rollover for Dockerfile and buildpack apps (Compose stacks and templates still restart, on purpose).
 
 ## Features
 

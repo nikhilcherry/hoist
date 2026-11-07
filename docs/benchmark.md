@@ -35,17 +35,25 @@ The poller, the runners and the analyser are `scripts/bench/`. Raw poll logs
 
 | | hoist | Dokploy |
 | --- | --: | --: |
-| Trigger→live, 5 deploys, median | **1.88 s** (1.12–1.95) | 2.53 s (2.48–2.63) |
-| Gap while the new version replaces the old | **0.65–1.45 s** | **0.10 s** (see note) |
+| Trigger→live, 6 deploys, median | **1.54 s** (1.41–1.64) | 2.53 s (2.48–2.63) |
+| Gap while the new version replaces the old | **0.00 s** (slowest request 10 ms) | ≈ 0.10 s (poller resolution) |
 | Broken build: old version keeps serving | yes, no gap | yes, no gap |
-| Fix after the broken build | 1.91 s | 2.66 s |
+| Fix after the broken build | 1.48 s | 2.66 s |
 
-**Dokploy's rollover is much smoother.** The page never went away for more than
-the poller's resolution (0.10 s is two 50 ms polls, an upper bound); I did not
-investigate the mechanism. hoist stops the old container and starts the new
-one, so a Dockerfile or Compose app has a gap of roughly a second per deploy. hoist is faster to *finish* because it does less
-work around the build, but it is not zero-downtime for container apps. (Plain
-process apps restart in well under a second.)
+**hoist's first run lost on rollover; the second does not.** The first hoist run
+(`bench-results/hoist-restart-based.*`) stopped the old container and started the
+new one: 1.1–1.9 s to go live with a 0.65–1.45 s gap, against Dokploy's 0.10 s.
+Docker apps that hoist builds from a Dockerfile or buildpack now start the new
+container beside the old one behind a small supervisor (`hoist front`) that owns
+the public port: it switches to the new container only once it answers HTTP,
+drains the old one, and never refuses a connection. A new version that never
+answers is discarded and the old one keeps serving. The figures above are that
+version.
+
+Seamless rollover covers **only** apps hoist builds itself from a Dockerfile or
+buildpack. Compose stacks, ready-made templates and databases keep the simple
+stop-and-start, on purpose: they may own data, and running two copies of a
+database at once could corrupt it.
 
 ### Footprint and responsiveness
 
@@ -55,7 +63,7 @@ process apps restart in well under a second.)
 | On disk | **0.9 MB** | **5.4 GB** (dokploy 4.51, postgres 0.64, traefik 0.25) |
 | Needs | Python, systemd; Docker only for container apps | root, Docker Swarm, ports 80, 443 and 3000 |
 | Idle memory | **29.6 MiB** | 638 MiB (dokploy 500, postgres 115, traefik 23) |
-| Idle CPU, nothing watching | 0.30 % (0.70 % before the fix below) | **≈ 0.1 %** (0.07 + 0.00 + 0.03) |
+| Idle CPU, nothing watching | 0.30 % (+ 0.02 % per seamless app) | **≈ 0.1 %** (0.07 + 0.00 + 0.03) |
 | Dashboard first load | **283 ms, 18 requests, 460 KB** | 958 ms, 118 requests, 7.2 MB |
 | API call (list of apps), median | **3.5 ms** (p95 5.3) | 24.1 ms (p95 36.8) |
 
@@ -70,7 +78,7 @@ its three containers, so it includes all their processes.
 
 ## What this found about hoist
 
-Measuring was worth doing: it turned up two real defects that the tests did not.
+Measuring was worth doing: it turned up defects that the tests did not, and it drove the rollover work above.
 
 - **Every container redeploy waited 10 s for nothing.** The first hoist run
   took about 11 s per deploy. A plain `python` or `node` server as a
@@ -86,6 +94,13 @@ Measuring was worth doing: it turned up two real defects that the tests did not.
   (it measured 1 ms). Buffering each response into one write and disabling
   Nagle brought it to 3.5 ms, and the dashboard's load time from 654 ms to
   283 ms. A regression test now fails without the fix.
+
+- **While building the rollover, benchmarking found three more.** Deploys six seconds
+  apart (inside the old container's drain window) made the supervisor swap back to a
+  stale container; a request arriving during container startup left it permanently
+  without a target; and a first version polled Docker every 2 s by spawning the CLI,
+  costing 3.3 % of a core per app (now 0.02 %, by asking the Docker Engine over its
+  socket). Each has a regression test.
 
 ## How far to trust this
 

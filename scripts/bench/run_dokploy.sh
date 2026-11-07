@@ -25,7 +25,7 @@ trigger() {  # trigger VERSION [fail]
     -H "X-GitHub-Event: push" -d '{"ref":"refs/heads/main","repository":{"full_name":"bench/bench"},"head_commit":{"message":"x"}}'
   echo "$t0 $1 ${2:-}" >> "$W/dokploy.triggers"
 }
-wait_live() { for _ in $(seq 1 1200); do grep -q " 200 $1\$" "$W/dokploy.poll" && return 0; sleep 0.1; done; return 1; }
+wait_live() { for _ in $(seq 1 1200); do grep -q " 200 $1 " "$W/dokploy.poll" && return 0; sleep 0.1; done; return 1; }
 
 sleep 2
 for i in 1 2 3 4 5; do push "d$i"; trigger "d$i"; wait_live "d$i" || echo "d$i never went live"; sleep 4; done
