@@ -248,6 +248,10 @@ def ensure_dockerfile_compose(directory: Path) -> Path:
     path = directory / GENERATED_COMPOSE
     path.write_text("# written by hoist for a repo with only a Dockerfile\n"
                     "services:\n  app:\n    build: .\n"
+                    # An init process as PID 1 passes the stop signal on. Without it a
+                    # plain `python`/`node` server ignores SIGTERM and every stop (so
+                    # every redeploy) waits out Docker's 10 second grace period.
+                    "    init: true\n"
                     f'    ports: ["127.0.0.1:${{PORT}}:{inner}"]\n'
                     f'    environment:\n      PORT: "{inner}"\n')
     return path
@@ -285,6 +289,7 @@ def ensure_buildpack_compose(directory: Path, app: str) -> Path:
     path = directory / GENERATED_COMPOSE
     path.write_text("# written by hoist for a project built with a buildpack\n"
                     f"services:\n  app:\n    image: {buildpack_image(app)}\n"
+                    "    init: true\n"
                     f'    ports: ["127.0.0.1:${{PORT}}:{BUILDPACK_INNER_PORT}"]\n'
                     f'    environment:\n      PORT: "{BUILDPACK_INNER_PORT}"\n')
     return path

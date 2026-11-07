@@ -95,6 +95,13 @@ def make_handler(dash: Dashboard):
     class Handler(BaseHTTPRequestHandler):
         server_version = f"hoist-dash/{VERSION}"
         protocol_version = "HTTP/1.1"
+        # Headers and body used to leave as two small sends. Nagle's algorithm
+        # holds the second until the first is acknowledged, and a browser delays
+        # that ACK by ~40 ms, so every API call took ~45 ms (curl hides this: it
+        # does not trigger the delay). Buffer each response into one write and
+        # turn Nagle off.
+        wbufsize = 64 * 1024
+        disable_nagle_algorithm = True
 
         # Quiet by default; errors still reach stderr.
         def log_message(self, fmt, *args):  # noqa: N802
@@ -288,6 +295,7 @@ def make_handler(dash: Dashboard):
 
         def _api_get(self, path: str, query: dict) -> None:
             if path == "/api/state":
+                dash.monitor.touch()
                 snap = dash.monitor.get()
                 seen = team.scope(self.user)
                 if seen is not None:

@@ -6,19 +6,23 @@ in two hours. This page compares them feature by feature. Dokploy's column is
 taken from its own documentation (links at the bottom); hoist's column is what
 this repository does and its tests check. Where Dokploy is ahead, it says so.
 
-## Footprint, measured on the same laptop
+## Measured on the same laptop
 
-Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026.
+Both were run on one Pop!_OS laptop (16 threads, 23 GB RAM) against the same app;
+the method, raw logs and caveats are in [benchmark.md](benchmark.md).
 
-| | hoist | Dokploy |
-| --- | --- | --- |
-| Install | `pip install hoist-cli` (user, no root) | `curl … \| sudo sh`: root, Docker Swarm, ports 80, 443 and 3000 |
-| On disk | **516 KB** (package, fonts included) | **5.4 GB** of images (dokploy 4.51 GB, postgres 642 MB, traefik 251 MB) |
-| Dashboard memory | **28 MB** RSS | not measured here |
-| Dependencies | Python standard library, systemd; Docker only for databases and stacks | Docker, Swarm, Traefik, Postgres |
-| Dashboard response | `/api/state` in about **1 ms** | — |
-| Public URL | Cloudflare Tunnel: no open ports, works behind NAT and campus Wi-Fi | Traefik on 80/443 with Let's Encrypt: needs a reachable server |
-| Works with no internet | yes (`--local` gives a LAN URL and QR; fonts bundled) | — |
+| | hoist | Dokploy v0.31.0 |
+| --- | --: | --: |
+| Install | 6.7 s | 236 s |
+| On disk | 0.9 MB | 5.4 GB |
+| Idle memory | 29.6 MiB | 638 MiB |
+| Dashboard first load | 283 ms, 460 KB | 958 ms, 7.2 MB |
+| Dashboard API call (median) | 3.5 ms | 24.1 ms |
+| Push→live, Dockerfile app (median of 5) | 1.88 s | 2.53 s |
+| Downtime while a container app is replaced | 0.65–1.45 s | ≈ 0.1 s |
+| Idle CPU (nothing watching) | 0.30 % | ≈ 0.1 % |
+
+Dokploy is ahead on seamless rollover and idle CPU. hoist is ahead on the rest.
 
 ## Features
 
@@ -26,7 +30,7 @@ Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026
 
 | | hoist | Dokploy | Notes |
 | --- | :-: | :-: | --- |
-| Deploy on `git push` | ✓ | ✓ | hoist: a signed GitHub/GitLab webhook goes live in **0.27 s** (median of 5, below), with a 20 s poll as fallback that needs no inbound access |
+| Deploy on `git push` | ✓ | ✓ | both accept a push webhook; hoist also polls every 20 s as a fallback that needs no inbound access. Timings in [benchmark.md](benchmark.md) |
 | Builds | ◐ | ✓ | hoist: npm/pnpm/yarn, Python venv, Procfile, Dockerfile, Compose, and Nixpacks or `pack` **if you already have them installed** (hoist never installs build tools; exercised with a stand-in tool honouring the Nixpacks command line, not the real one). Dokploy bundles Nixpacks and Heroku/Paketo buildpacks |
 | Docker Compose stacks | ✓ | ✓ | hoist builds a stack before it goes live, so a broken Dockerfile never replaces the running one |
 | A failed build never takes the app down | ✓ | — | hoist builds each commit in its own release and swaps a symlink only on success; Dokploy documents automatic rollback on failed Swarm health checks |
@@ -49,20 +53,6 @@ Both were installed on one Pop!_OS laptop (16 cores, 23 GB RAM) in November 2026
 | QR code for every app | ✓ | — | for putting the demo on a judge's phone |
 | Several servers | ◐ | ✓ | hoist: link other machines' dashboards and manage them all from one (apps, deploys, logs, databases, backups), tokens kept server-side. Dokploy also scales one app across a Swarm cluster; hoist does not |
 | Command palette, light and dark | ✓ | — | |
-
-## Measured: push to live
-
-`scripts/bench_deploy.sh` makes a throwaway repo, deploys it with hoist, pushes
-a change and times how long until the new page is served. On the test laptop:
-
-| Trigger | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
-| --- | --: | --: | --: | --: | --: |
-| GitHub-style webhook | 273 ms | 266 ms | 267 ms | 284 ms | 296 ms |
-| 20 s poll (no webhook) | 4.8 s | 21.0 s | 20.6 s | 21.5 s | 21.0 s |
-
-A failed build is measured by the test suite instead of a timer: the live
-release's files are checked untouched after a build that deletes them and
-exits non-zero (`test_a_broken_build_never_touches_the_files_being_served`).
 
 ## What Dokploy still does that hoist does not
 

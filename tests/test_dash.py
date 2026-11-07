@@ -22,6 +22,9 @@ class _StubMonitor:
     def nudge(self):
         pass
 
+    def touch(self):
+        pass
+
     def get(self):
         apps = [{"name": n, "kind": "app"} for n in config.load().get("apps", {})]
         return {"apps": apps, "system": {}, "routes": {"rules": []}}
@@ -470,3 +473,35 @@ def test_someone_limited_to_an_environment_cannot_relabel_apps(two_apps):
     assert team.stage_of("api") == "staging"
     unscoped = team.add("lead", "custom", ["config"], [])
     assert call(port, "POST", "/api/apps/api/stage", {"stage": "staging"}, headers=_w(unscoped))[0] != 403
+
+
+def test_api_responses_are_not_delayed_by_nagle_and_delayed_ack(dash):
+    """The bug this pins: headers and body left as two small writes, so each API
+    call in a browser took ~45 ms (Nagle waiting for a delayed ACK). Thirty calls
+    on one keep-alive connection must come back in a few ms each."""
+    import time
+    port, token = dash
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    times = []
+    for _ in range(30):
+        started = time.perf_counter()
+        conn.request("GET", "/api/state", headers=auth(token))
+        conn.getresponse().read()
+        times.append(time.perf_counter() - started)
+    conn.close()
+    times.sort()
+    assert times[15] < 0.02, f"median {times[15] * 1000:.1f} ms"
+    assert server.make_handler(object()).disable_nagle_algorithm is True
+
+
+def test_the_monitor_samples_slowly_when_nobody_is_watching(monkeypatch):
+    """Each sample spawns systemctl and docker; idling at the full rate cost about
+    0.7 % of a core. Nobody watching means a slow rate; a request speeds it up."""
+    import time
+    monkeypatch.setattr(collect.Monitor, "refresh", lambda self: None)
+    monitor = collect.Monitor()
+    assert monitor.interval() == collect.IDLE_EVERY
+    monitor.touch()
+    assert monitor.interval() == collect.SAMPLE_EVERY and monitor.wake.is_set()
+    monitor.last_watched = time.time() - collect.WATCHING_FOR - 1
+    assert monitor.interval() == collect.IDLE_EVERY

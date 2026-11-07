@@ -1,0 +1,11 @@
+version     outcome                     trigger→live   longest gap
+d1          live                              2.58 s        0.10 s
+d2          live                              2.48 s        0.10 s
+d3          live                              2.63 s        0.10 s
+d4          live                              2.49 s        0.10 s
+d5          live                              2.53 s        0.10 s
+dbroken     old version kept serving               —        0.00 s
+dfix        live                              2.66 s        0.10 s
+
+successful deploys: 6   median 2.56 s   min 2.48 s   max 2.66 s
+downtime during deploy (longest gap): median 0.10 s   max 0.10 s
