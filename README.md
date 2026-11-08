@@ -194,6 +194,13 @@ hoist dash --public dash  # optional: also at https://dash.<your-domain>, behind
 
 <img src="docs/dashboard.png" width="100%" alt="The hoist dashboard overview: three live apps, public-check column, and CPU, memory and disk for the machine">
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/dashboard-app.png" alt="An app page: the route strip from source to build to process to port to network, uptime and response cards, resources, and a QR code to open it on a phone"><br><sub><b>An app</b> — the route strip shows which hop is broken, plus a QR code for the phone.</sub></td>
+    <td width="50%"><img src="docs/dashboard-machine.png" alt="The Machine page: CPU, memory, swap, disk and tunnel status with live charts for CPU, memory and network"><br><sub><b>The machine</b> — CPU, memory, disk and tunnel health, with the <code>hoist doctor</code> checks below.</sub></td>
+  </tr>
+</table>
+
 Everything the CLI does, in one place, for the whole team:
 
 - **Overview** that answers "can a judge open every app right now?" — each app's
