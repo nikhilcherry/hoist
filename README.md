@@ -15,6 +15,13 @@ That's it. Your app is running as a managed service, it survives crashes and
 reboots, it has a real certificate, and the QR code on screen puts it on a
 judge's phone in about two seconds.
 
+hoist started as that one command and has grown into a small self-hosting
+platform for one machine or a team: push-to-deploy from git, a web dashboard,
+databases and 46 one-click apps, backups, branch previews, per-person
+permissions, and zero-downtime deploys. It is still **one standard-library
+Python package with no dependencies**, and it was measured against Dokploy on
+the same laptop (see [Measured](#measured)).
+
 > Every screenshot here is a real run, rendered from the terminal output by
 > [`scripts/make_docs_images.sh`](scripts/make_docs_images.sh). The QR codes in
 > them scan.
@@ -92,6 +99,8 @@ locally, and tells you when a different server answered.
 - [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
   with a tunnel already created, and a domain on Cloudflare
 - Python 3.9+
+- Docker, *only* for the Docker features: Dockerfile and Compose repos,
+  `hoist db`, `hoist template` and buildpacks (optional). Plain apps don't need it.
 
 Only want a LAN URL? Skip cloudflared entirely and use `--local`.
 
@@ -241,6 +250,23 @@ everything else. Their CPU and memory are read from the containers' own
 cgroups, and their limits go to Docker. Databases (`hoist db`) and templates
 (`hoist template`) are Docker apps too, so they get logs, restart, limits and
 the dashboard for free.
+
+## Measured
+
+Same laptop, same Dockerfile app, same push webhook, a 50 ms poller watching the
+public URL; full method and raw logs in [docs/benchmark.md](docs/benchmark.md),
+feature comparison in [docs/vs-dokploy.md](docs/vs-dokploy.md).
+
+| | hoist | Dokploy v0.31.0 |
+| --- | --: | --: |
+| Push → live, median of 6 deploys | **1.54 s** | 2.53 s |
+| Downtime during the swap | **0.00 s** | ≈ 0.10 s |
+| Broken build | old version keeps serving | old version keeps serving |
+| Dashboard API latency | 3.5 ms median | 24 ms |
+
+Benchmarking found real bugs (a Nagle/delayed-ACK stall that made the dashboard's
+API take 45 ms, a stale-container swap race, a supervisor that polled Docker too
+often), each now pinned by a test. Re-run it with `scripts/bench_deploy.sh`.
 
 ## What it detects
 
@@ -396,9 +422,16 @@ slow to undo, and reusing the same name later just works.
 
 <img src="docs/architecture.svg" width="100%" alt="Four stages: detect.py picks a free port and start command, service.py writes and starts a user systemd unit, tunnel.py adds an ingress rule and routes DNS, qr.py renders the URL as a scannable code">
 
-State lives in `~/.config/hoist/apps.json`. Nothing is hidden anywhere else:
-hoist only ever touches that file, its own systemd units, and the ingress
-rules it marked.
+State lives in `~/.config/hoist/apps.json`, written atomically and under a lock
+so concurrent deploys can't corrupt it. Nothing is hidden anywhere else: hoist
+only ever touches that file, its own systemd units and timers, its release and
+checkout directories, and the ingress rules it marked.
+
+Beyond the four stages above: `source.py` clones, builds and releases repos,
+`containers.py` runs Docker apps, databases and templates, `front.py` is the
+small supervisor that gives Docker apps their zero-downtime rollover, `notify.py`
+sends alerts, and `dash/` is the dashboard (standard-library server plus one
+page of plain JavaScript).
 
 ## Development
 
@@ -406,6 +439,9 @@ rules it marked.
 pip install -e ".[dev]"
 pytest -q
 ```
+
+Deploy performance is checked by `scripts/bench_deploy.sh` (needs Docker);
+results are committed under `docs/bench-results/`.
 
 The QR encoder is written from scratch against the spec so the tool has no
 dependencies. It is tested two ways: a golden matrix in the unit tests, and
