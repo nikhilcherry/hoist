@@ -11,6 +11,10 @@
   <img src="docs/demo-up.svg" width="584" alt="hoist up publishing a directory: it picks a free port, writes a systemd unit, adds an ingress rule, routes DNS, reloads cloudflared, verifies the public URL, then prints it with a scannable QR code">
 </p>
 
+<p align="center">
+  <img src="docs/demo-dashboard.gif" width="820" alt="Push to deploy and rollback: the running app shows v3, the Deployments page lists three deploys, one click on Roll back confirms and returns to v2 in 0.4 seconds, and the app now shows v2">
+</p>
+
 That's it. Your app is running as a managed service, it survives crashes and
 reboots, it has a real certificate, and the QR code on screen puts it on a
 judge's phone in about two seconds.
@@ -42,7 +46,8 @@ easy to get wrong under time pressure:
 ## Install
 
 ```bash
-pipx install hoist-cli        # or: pip install --user hoist-cli
+pipx install git+https://github.com/nikhilcherry/hoist
+# once it is on PyPI:  pipx install hoist-cli
 ```
 
 Or straight from source, no packaging step:
@@ -394,6 +399,22 @@ and adopt the port it is already on:
 hoist adopt api --port 8000
 ```
 
+## Limitations
+
+Honest list, so you can decide quickly:
+
+- **Linux with `systemd --user` only.** No macOS or Windows host support.
+- **Cloudflare Tunnel is the only public-URL backend** (plus `--local` for a LAN
+  URL). No Caddy, Traefik or ngrok mode yet.
+- **One machine.** `Machines` in the dashboard links other hoist hosts, but there
+  is no scheduler, clustering or failover.
+- **Zero-downtime rollover is for Dockerfile and buildpack apps only.** Plain
+  apps restart in well under a second; Compose stacks, templates and databases
+  stop and start on purpose, since two copies of a database could corrupt it.
+- Benchmarked on one laptop against one competitor ([details](docs/benchmark.md));
+  treat the numbers as a method, not a universal claim.
+- Docker features are tested on Docker Engine only (not Podman).
+
 ## Safety around your tunnel config
 
 The cloudflared config is usually a live file with hand-written rules in it,
@@ -469,6 +490,10 @@ scripts/make_docs_images.sh --public NAME    # also re-shoot the publish flow
 testing — it rewrites your cloudflared config and restarts the tunnel. The
 script re-decodes every QR it renders with `zbarimg` at the end, and redacts
 the tunnel id out of the `doctor` shot.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and the [CHANGELOG](CHANGELOG.md).
 
 ## License
 
