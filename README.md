@@ -192,6 +192,8 @@ hoist dash --service      # runs on 127.0.0.1:7457, survives reboots; prints a s
 hoist dash --public dash  # optional: also at https://dash.<your-domain>, behind the same token
 ```
 
+<img src="docs/dashboard.png" width="100%" alt="The hoist dashboard overview: three live apps, public-check column, and CPU, memory and disk for the machine">
+
 Everything the CLI does, in one place, for the whole team:
 
 - **Overview** that answers "can a judge open every app right now?" — each app's
