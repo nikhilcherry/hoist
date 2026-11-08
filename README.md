@@ -46,8 +46,8 @@ easy to get wrong under time pressure:
 ## Install
 
 ```bash
-pipx install git+https://github.com/nikhilcherry/hoist
-# once it is on PyPI:  pipx install hoist-cli
+pipx install hoist-cli        # or: pip install --user hoist-cli
+# latest from git:  pipx install git+https://github.com/nikhilcherry/hoist
 ```
 
 Or straight from source, no packaging step:
